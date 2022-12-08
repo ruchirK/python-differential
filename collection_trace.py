@@ -39,20 +39,20 @@ class Index:
             keys = [key for key in self.inner.keys()]
 
         for key in keys:
-           versions = self.inner[key]
-           to_compact = [version for version in versions.keys() if v <= compaction_version]
-           values = []
-           for version in to_compact:
-               values.extend(versions.pop(version))
+            versions = self.inner[key]
+            to_compact = [version for version in versions.keys() if v <= compaction_version]
+            values = []
+            for version in to_compact:
+                values.extend(versions.pop(version))
 
-           versions[compaction_version] = consolidate_values(values)
-       self.compaction_frontier = compaction_version,
+            versions[compaction_version] = consolidate_values(values)
+        self.compaction_frontier = compaction_version
 
-class CollectionTrace(self, trace):
-    def __init__():
+class CollectionTrace:
+    def __init__(self, trace):
         self.trace = trace
 
-    def __repr__():
+    def __repr__(self):
         return f'CollectionTrace({self.trace})'
 
     def map(self, f):
@@ -125,3 +125,16 @@ class CollectionTrace(self, trace):
             b.compact(version, keys)
         return CollectionTrace(out)
 
+if __name__ == '__main__':
+    a = Collection([(('apple', '$5'), 2), (('banana', '$2'), 1)])
+    b = Collection([(('apple', '$3'), 1), (('apple', ('granny smith', '$2')), 1), (('kiwi', '$2'), 1)])
+    c = Collection([(('apple', '$5'), 2), (('banana', '$2'), 1), (('apple', '$2'), 20)])
+    d = Collection([(('apple', 11), 1), (('apple', 3), 2), (('banana', 2), 3), (('coconut', 3), 1)])
+    e = Collection([(1, 1)])
+
+    trace_a = CollectionTrace([(0, a), (1, Collection([(('apple', '$5'), -1), (('apple', '$7'), 1)])), (2, Collection([(('lemon', '$1'), 1)]))])
+    print(trace_a.map(lambda data: (data[1], data[0])))
+    print(trace_a.filter(lambda data: data[0] != 'apple'))
+
+    trace_b = CollectionTrace([(1, b)])
+    print(trace_a.join(trace_b))
