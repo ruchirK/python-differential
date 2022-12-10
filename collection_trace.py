@@ -17,6 +17,14 @@ class Index:
             if version < requested_version:
                 out.extend(values)
         return out
+    
+    def reconstruct_at(self, key, requested_version):
+        self._validate(requested_version)
+        out = []
+        for (version, values) in self.inner[key].items():
+            if version <= requested_version:
+                out.extend(values)
+        return out
 
     def values(self, key, version):
         return self.inner[key][version]
@@ -29,12 +37,32 @@ class Index:
         self._validate(version)
         self.inner[key][version].extend(values)
 
+    def append(self, other):
+        for (key, versions) in other.inner.items():
+            for (version, data) in versions.items():
+                self.inner[key][version].extend(data)
+
     def to_trace(self):
         collections = defaultdict(list)
         for (key, versions) in self.inner.items():
             for (version, data) in versions.items():
                 collections[version].extend([((key, val), multiplicity) for (val, multiplicity) in data])
         return CollectionTrace([(version, Collection(collection)) for (version, collection) in collections.items()])
+
+    def join(self, other):
+        collections = defaultdict(list)
+        for (key, versions) in self.inner.items():
+            if key not in other.inner:
+                continue
+            other_versions = other.inner[key]
+
+            for (version1, data1) in versions.items():
+                for (version2, data2) in other_versions.items():
+                    for (val1, mul1) in data1:
+                        for (val2, mul2) in data2:
+                            result_version = max(version1, version2)
+                            collections[result_version].append(((key, (val1, val2)), mul1 * mul2))
+        return [(version, Collection(c)) for (version, c) in collections.items() if c != []]
 
     def compact(self, compaction_version, keys=[]):
         self._validate(compaction_version)

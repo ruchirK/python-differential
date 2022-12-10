@@ -127,7 +127,18 @@ if __name__ == '__main__':
     print(c.min())
     print(c.max())
     print(d.sum())
-    print(e.iterate(lambda collection: collection.map(lambda data: data + 1).concat(collection).filter(lambda data: data <= 10).map(lambda data: (data, ())).distinct().map(lambda data: data[0]).consolidate()))
 
+    def add_one(collection):
+        return collection.map(lambda data: data + 1)  \
+            .concat(collection)                       \
+            .filter(lambda data: data <= 5)          \
+            .map(lambda data: (data, ()))             \
+            .distinct()                               \
+            .map(lambda data: data[0])                \
+            .consolidate()
+    
+    collection = Collection([(1, 1)])
+    result = collection.iterate(add_one).map(lambda data: (data, data * data))
+    print(result)
 
 
