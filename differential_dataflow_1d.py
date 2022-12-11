@@ -343,7 +343,7 @@ if __name__ == '__main__':
     input_a = graph.new_stream()
     input_b = graph.new_stream()
 
-    output = input_a.join(input_b)
+    output = input_a.join(input_b).count()
     output_listener = output.connect_to()
 
     for i in range(0, 10):
@@ -355,3 +355,7 @@ if __name__ == '__main__':
         input_b.send_frontier(i)
         graph.step()
         print(output_listener.drain())
+    input_a.send_frontier(11)
+    input_b.send_frontier(11)
+    graph.step()
+    print(output_listener.drain())

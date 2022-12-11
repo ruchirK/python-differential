@@ -10,7 +10,12 @@ class Index:
         self.compaction_frontier = None
 
     def _validate(self, requested_version):
-       assert(self.compaction_frontier is None or self.compaction_frontier.less_equal(requested_version))
+       if self.compaction_frontier is None:
+           return True
+       if isinstance(requested_version, Antichain):
+           assert(self.compaction_frontier.less_equal(requested_version))
+       elif isinstance(requested_version, Version):
+           assert(self.compaction_frontier.less_equal_version(requested_version))
 
     def reconstruct_at(self, key, requested_version):
         self._validate(requested_version)
@@ -23,13 +28,12 @@ class Index:
     def values(self, key, version):
         return self.inner[key][version]
 
+    def versions(self, key):
+        return [version for version in self.inner[key].keys()]
+
     def add_value(self, key, version, value):
         self._validate(version)
         self.inner[key][version].append(value)
-
-    def add_values(self, key, version, values):
-        self._validate(version)
-        self.inner[key][version].extend(values)
 
     def append(self, other):
         for (key, versions) in other.inner.items():
@@ -82,6 +86,7 @@ class Index:
             for version in to_consolidate:
                 values = versions.pop(version)
                 versions[version] = consolidate_values(values)
+        assert(self.compaction_frontier is None or self.compaction_frontier.less_equal(compaction_frontier))
         self.compaction_frontier = compaction_frontier
 
 class Graph:
@@ -142,10 +147,22 @@ class CollectionStream:
         self.graph.add_operator(filter_operator)
         return output
     
-    def negate(self, ):
+    def negate(self):
         output = self.graph.new_stream()
         negate_operator = NegateOperator(self.connect_to(), output, self.graph.frontier())
         self.graph.add_operator(negate_operator)
+        return output
+
+    def debug(self, name=''):
+        output = self.graph.new_stream()
+        debug_operator = DebugOperator(self.connect_to(), output, name, self.graph.frontier())
+        self.graph.add_operator(debug_operator)
+        return output
+    
+    def consolidate(self):
+        output = self.graph.new_stream()
+        consolidate_operator = ConsolidateOperator(self.connect_to(), output, self.graph.frontier())
+        self.graph.add_operator(consolidate_operator)
         return output
     
     def concat(self, other):
@@ -161,6 +178,42 @@ class CollectionStream:
         join_operator = JoinOperator(self.connect_to(), other.connect_to(), output, self.graph.frontier())
         self.graph.add_operator(join_operator)
         return output
+    
+    def count(self):
+        output = self.graph.new_stream()
+        count_operator = CountOperator(self.connect_to(), output, self.graph.frontier())
+        self.graph.add_operator(count_operator)
+        return output
+    def distinct(self):
+        output = self.graph.new_stream()
+        distinct_operator = DistinctOperator(self.connect_to(), output, self.graph.frontier())
+        self.graph.add_operator(distinct_operator)
+        return output
+
+    # creates a new scope and brings a collection into it.
+    # to be used only for iterate.
+    def _enter(self):
+        new_frontier = self.graph.frontier().extend()
+        self.graph.push_frontier(new_frontier)
+        output = self.graph.new_stream()
+        ingress_operator = IngressOperator(self.connect_to(), output, self.graph.frontier())
+        self.graph.add_operator(ingress_operator)
+        return output
+    
+    def _leave(self):
+        self.graph.pop_frontier()
+        output = self.graph.new_stream()
+        egress_operator = EgressOperator(self.connect_to(), output, self.graph.frontier())
+        self.graph.add_operator(egress_operator)
+        return output
+
+    def iterate(self, f):
+        feedback_stream = self.graph.new_stream()
+        entered = self._enter().concat(feedback_stream)
+        result = f(entered)
+        feedback_operator = FeedbackOperator(result.connect_to(), 1, feedback_stream, graph.frontier())
+        self.graph.add_operator(feedback_operator)
+        return result._leave()
 
 class Version:
     def __init__(self, version):
@@ -180,6 +233,10 @@ class Version:
 
     def __eq__(self, other):
         return self.inner == other.inner
+
+    # TODO need to make sure it respects partial order
+    def __lt__(self, other):
+        return self.inner.__lt__(other.inner)
     
     def __hash__(self):
         return hash(self.inner)
@@ -219,12 +276,28 @@ class Version:
 
     # TODO the proof for this is in the sharing arrangements paper.
     def advance_by(self, frontier):
-        if frontier.inner == []:
+        if frontier.inner == ():
             return self
         result = frontier.inner[0]
         for elem in frontier.inner:
             result = result.meet(self.join(elem))
         return result
+
+    def extend(self):
+        elements = [e for e in self.inner]
+        elements.append(0)
+        return Version(elements)
+    
+    def truncate(self):
+        elements = [e for e in self.inner]
+        elements.pop()
+        return Version(elements)
+
+    def apply_step(self, step):
+        assert(step > 0)
+        elements = [e for e in self.inner]
+        elements[-1] += step
+        return Version(elements)
 
 # This keeps the min antichain.
 # I fully stole this from frank. TODO: Understand this better
@@ -283,6 +356,23 @@ class Antichain:
                 return True
         return False
 
+    def extend(self):
+        out = Antichain([])
+        for elem in self.inner:
+            out._insert(elem.extend())
+        return out
+        
+    def truncate(self):
+        out = Antichain([])
+        for elem in self.inner:
+            out._insert(elem.truncate())
+        return out
+
+    def apply_step(self, step):
+        out = Antichain([])
+        for elem in self.inner:
+            out._insert(elem.apply_step(step))
+        return out
 class Operator:
     def __init__(self, inputs, output, f, initial_frontier):
         self.inputs = inputs
@@ -404,6 +494,44 @@ class ConcatOperator(BinaryOperator):
 
         super().__init__(input_a, input_b, output, inner, initial_frontier)
 
+class ConsolidateOperator(UnaryOperator):
+    def __init__(self, input_a, output, initial_frontier):
+        self.collections = defaultdict(Collection)
+
+        def inner():
+            for (typ, version, collection) in self.input_messages():
+                if typ == MessageType.DATA:
+                    self.collections[version]._extend(collection)
+                elif typ == MessageType.FRONTIER:
+                    assert(self.input_frontier().less_equal(version))
+                    self.set_input_frontier(version)
+            finished_versions = [version for version in self.collections.keys() if self.input_frontier().less_equal_version(version) is not True]
+            for version in finished_versions:
+                collection = self.collections.pop(version).consolidate()
+                self.output.send_data(version, collection)
+            assert(self.output_frontier.less_equal(self.input_frontier()))
+            if self.output_frontier.less_than(self.input_frontier()):
+                self.output_frontier = self.input_frontier()
+                self.output.send_frontier(self.output_frontier)
+        super().__init__(input_a, output, inner, initial_frontier)
+
+class DebugOperator(UnaryOperator):
+    def __init__(self, input_a, output, name, initial_frontier):
+        def inner():
+            for (typ, version, collection) in self.input_messages():
+                if typ == MessageType.DATA:
+                    print(f'debug {name} data: version: {version} collection: {collection}')
+                    self.output.send_data(version, collection)
+                elif typ == MessageType.FRONTIER:
+                    assert(self.input_frontier().less_equal(version))
+                    self.set_input_frontier(version)
+                    print(f'debug {name} notification: frontier {version}')
+                    assert(self.output_frontier.less_equal(self.input_frontier()))
+                    if self.output_frontier.less_than(self.input_frontier()):
+                        self.output_frontier = self.input_frontier()
+                        self.output.send_frontier(self.output_frontier)
+        super().__init__(input_a, output, inner, initial_frontier)
+
 class JoinOperator(BinaryOperator):
     def __init__(self, input_a, input_b, output, initial_frontier):
         self.index_a = Index()
@@ -451,6 +579,138 @@ class JoinOperator(BinaryOperator):
 
         super().__init__(input_a, input_b, output, inner, initial_frontier)
 
+class ReduceOperator(UnaryOperator):
+    def __init__(self, input_a, output, f, initial_frontier):
+        self.index = Index()
+        self.index_out = Index()
+        self.keys_todo = defaultdict(set)
+        def subtract_values(first, second):
+            result = defaultdict(int)
+            for (v1, m1) in first:
+                result[v1] += m1
+            for (v2, m2) in second:
+                result[v2] -= m2
+
+            return [(val, multiplicity) for (val, multiplicity) in result.items() if multiplicity != 0]
+
+        def inner():
+            for (typ, version, collection) in self.input_messages():
+                if typ == MessageType.DATA:
+                    for ((key, value), multiplicity) in collection.inner:
+                        self.index.add_value(key, version, (value, multiplicity))
+                        self.keys_todo[version].add(key)
+                        for v2 in self.index.versions(key):
+                            new_version = version.join(v2)
+                            self.keys_todo[version.join(v2)].add(key)
+                elif typ == MessageType.FRONTIER:
+                    assert(self.input_frontier().less_equal(version))
+                    self.set_input_frontier(version)
+
+            finished_versions = [version for version in self.keys_todo.keys() if self.input_frontier().less_equal_version(version) is not True]
+
+            finished_versions.sort()
+            for version in finished_versions:
+               keys = self.keys_todo.pop(version)
+               result = []
+               for key in keys:
+                   curr = self.index.reconstruct_at(key, version)
+                   curr_out = self.index_out.reconstruct_at(key, version)
+                   out = f(curr)
+                   delta = subtract_values(out, curr_out)
+                   for (value, multiplicity) in delta:
+                       result.append(((key, value), multiplicity))
+                       self.index_out.add_value(key, version, (value, multiplicity))
+               if result != []:
+                   self.output.send_data(version, Collection(result))
+            
+            assert(self.output_frontier.less_equal(self.input_frontier()))
+            if self.output_frontier.less_than(self.input_frontier()):
+                self.output_frontier = self.input_frontier()
+                self.output.send_frontier(self.output_frontier)
+                self.index.compact(self.output_frontier)
+                self.index_out.compact(self.output_frontier)
+
+        super().__init__(input_a, output, inner, initial_frontier)
+
+class CountOperator(ReduceOperator):
+    def __init__(self, input_a, output, initial_frontier):
+        def count_inner(vals):
+            out = 0
+            for (_, diff) in vals:
+                out += diff
+            return [(out, 1)]
+        super().__init__(input_a, output, count_inner, initial_frontier)
+
+class DistinctOperator(ReduceOperator):
+    def __init__(self, input_a, output, initial_frontier):
+        def distinct_inner(vals):
+            consolidated = defaultdict(int)
+            for (val, diff) in vals:
+                consolidated[val] += diff
+            for (val, diff) in consolidated.items():
+                assert(diff >= 0)
+            return [(val, 1) for (val, diff) in consolidated.items() if diff > 0]
+        super().__init__(input_a, output, distinct_inner, initial_frontier)
+
+class FeedbackOperator(UnaryOperator):
+    def __init__(self, input_a, step, output, initial_frontier):
+        def inner():
+            for (typ, version, collection) in self.input_messages():
+                if typ == MessageType.DATA:
+                    self.output.send_data(version.apply_step(step), collection)
+                elif typ == MessageType.FRONTIER:
+                    assert(self.input_frontier().less_equal(version))
+                    self.set_input_frontier(version)
+
+            candidate_output_frontier = self.input_frontier().apply_step(step)
+            assert(self.output_frontier.less_equal(candidate_output_frontier))
+            if self.output_frontier.less_than(candidate_output_frontier):
+                self.output_frontier = candidate_output_frontier
+                self.output.send_frontier(self.output_frontier)
+
+        super().__init__(input_a, output, inner, initial_frontier)
+
+    def connect_loop(output):
+        self.output = output 
+
+class IngressOperator(UnaryOperator):
+    def __init__(self, input_a, output, initial_frontier):
+        def inner():        
+            for (typ, version, collection) in self.input_messages():
+                if typ == MessageType.DATA:
+                    new_version = version.extend()
+                    self.output.send_data(new_version, collection)
+                    self.output.send_data(new_version.apply_step(1), collection.negate())
+                elif typ == MessageType.FRONTIER:
+                    new_frontier = version.extend()
+                    assert(self.input_frontier().less_equal(new_frontier))
+                    self.set_input_frontier(new_frontier)
+
+            assert(self.output_frontier.less_equal(self.input_frontier()))
+            if self.output_frontier.less_than(self.input_frontier()):
+                self.output_frontier = self.input_frontier()
+                self.output.send_frontier(self.output_frontier)
+        super().__init__(input_a, output, inner, initial_frontier)
+
+class EgressOperator(UnaryOperator):
+    def __init__(self, input_a, output, initial_frontier):
+        def inner():        
+            for (typ, version, collection) in self.input_messages():
+                if typ == MessageType.DATA:
+                    new_version = version.truncate()
+                    self.output.send_data(new_version, collection)
+                elif typ == MessageType.FRONTIER:
+                    new_frontier = version.truncate()
+                    print(f'version  {version} {new_frontier} {self.input_frontier()}')
+                    assert(self.input_frontier().less_equal(new_frontier))
+                    self.set_input_frontier(new_frontier)
+
+            assert(self.output_frontier.less_equal(self.input_frontier()))
+            if self.output_frontier.less_than(self.input_frontier()):
+                self.output_frontier = self.input_frontier()
+                self.output.send_frontier(self.output_frontier)
+        super().__init__(input_a, output, inner, initial_frontier)
+        
 if __name__ == '__main__':
     graph = Graph(Antichain([Version([0, 0])]))
     input_a = graph.new_stream()
@@ -469,10 +729,10 @@ if __name__ == '__main__':
     input_a = graph.new_stream()
     input_b = graph.new_stream()
 
-    output = input_a.join(input_b)
+    output = input_a.join(input_b).count()
     output_listener = output.connect_to()
 
-    for i in range(0, 10):
+    for i in range(0, 2):
         input_a.send_data(Version([0, i]), Collection([((1, i), 2)]))
         input_a.send_data(Version([0, i]), Collection([((2, i), 2)]))
 
@@ -483,3 +743,32 @@ if __name__ == '__main__':
         input_b.send_frontier(Antichain([Version([i, 0]), Version([0, i * 2])]))
         graph.step()
         print(output_listener.drain())
+        
+    input_a.send_frontier(Antichain([Version([11, 11])]))
+    input_b.send_frontier(Antichain([Version([11, 11])]))
+    graph.step()
+    print(output_listener.drain())
+    graph = Graph(Antichain([Version(0)]))
+    input_a = graph.new_stream()
+    def geometric_series(collection):
+        return collection.map(lambda data: data + data) \
+            .concat(collection)                     \
+            .filter(lambda data: data <= 100)          \
+            .map(lambda data: (data, ()))             \
+            .distinct()                               \
+            .map(lambda data: data[0])                \
+            .consolidate()
+
+    output = input_a.iterate(geometric_series).debug('output')
+    output_listener = output.connect_to()
+    for i in range(0, 10):
+        input_a.send_data(Version(i), Collection([(i, 1)]))
+
+        a_frontier = Antichain([Version(i)])
+        input_a.send_frontier(a_frontier)
+        graph.step()
+        #print(output_listener.drain())
+
+
+    for i in range(0, 100):
+        graph.step()
