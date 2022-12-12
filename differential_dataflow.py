@@ -327,6 +327,19 @@ class Antichain:
 
         return out
 
+    def _equals(self, other):
+        elements_1 = [x for x in self.inner]
+        elements_2 = [y for y in other.inner]
+
+        if len(elements_1) != len(elements_2):
+            return False
+        elements_1.sort()
+        elements_2.sort()
+
+        for (x, y) in zip(elements_1, elements_2):
+            if x != y:
+                return False
+        return True
     # Returns true if other dominates self
     # in other words self < other means
     # self <= other AND self != other
@@ -334,11 +347,10 @@ class Antichain:
         if self.less_equal(other) is not True:
             return False
 
-        for o in other.inner:
-            for s in self.inner:
-                if s.less_than(o):
-                    return True
-        return False
+        if self._equals(other):
+            return False
+
+        return True
     
     def less_equal(self, other):
         for o in other.inner:
@@ -373,6 +385,10 @@ class Antichain:
         for elem in self.inner:
             out._insert(elem.apply_step(step))
         return out
+
+    def _elements(self):
+        return [x for x in self.inner]
+
 class Operator:
     def __init__(self, inputs, output, f, initial_frontier):
         self.inputs = inputs
@@ -654,15 +670,33 @@ class DistinctOperator(ReduceOperator):
 
 class FeedbackOperator(UnaryOperator):
     def __init__(self, input_a, step, output, initial_frontier):
+        self.versions_with_data = set()
         def inner():
             for (typ, version, collection) in self.input_messages():
                 if typ == MessageType.DATA:
                     self.output.send_data(version.apply_step(step), collection)
+                    self.versions_with_data.add(version.apply_step(step))
                 elif typ == MessageType.FRONTIER:
                     assert(self.input_frontier().less_equal(version))
                     self.set_input_frontier(version)
 
             candidate_output_frontier = self.input_frontier().apply_step(step)
+            # TODO XXX not sure about this!
+            #print(f'versions with data: {self.versions_with_data}')
+            elements = candidate_output_frontier._elements()
+            elements.sort()
+            candidate = set()
+            candidate.add(elements[-1])
+            for elem in elements:
+                to_remove = [x for x in self.versions_with_data if x.less_than(elem)]
+                #print(f'elem: {elem} to_remove: {to_remove}')
+                if len(to_remove) > 0:
+                    candidate.add(elem)
+                    for x in to_remove:
+                        self.versions_with_data.remove(x)
+            candidate_output_frontier = Antichain([x for x in candidate])
+            #print(f'candidate_output_frontier: {candidate_output_frontier} output_frontiier: {self.output_frontier}')
+            
             assert(self.output_frontier.less_equal(candidate_output_frontier))
             if self.output_frontier.less_than(candidate_output_frontier):
                 self.output_frontier = candidate_output_frontier
@@ -701,7 +735,6 @@ class EgressOperator(UnaryOperator):
                     self.output.send_data(new_version, collection)
                 elif typ == MessageType.FRONTIER:
                     new_frontier = version.truncate()
-                    print(f'version  {version} {new_frontier} {self.input_frontier()}')
                     assert(self.input_frontier().less_equal(new_frontier))
                     self.set_input_frontier(new_frontier)
 
@@ -712,6 +745,33 @@ class EgressOperator(UnaryOperator):
         super().__init__(input_a, output, inner, initial_frontier)
         
 if __name__ == '__main__':
+
+    v0_0 = Version([0, 0])
+    v1_0 = Version([1, 0])
+    v0_1 = Version([0, 1])
+    v1_1 = Version([1, 1])
+    v2_0 = Version([2, 0])
+
+    assert(v0_0.less_than(v1_0))
+    assert(v0_0.less_than(v0_1))
+    assert(v0_0.less_than(v1_1))
+    assert(v0_0.less_equal(v1_0))
+    assert(v0_0.less_equal(v0_1))
+    assert(v0_0.less_equal(v1_1))
+
+    assert(v1_0.less_than(v1_0) is not True)
+    assert(v1_0.less_equal(v1_0))
+    assert(v1_0.less_equal(v0_1) is not True)
+    assert(v0_1.less_equal(v1_0) is not True)
+    assert(v0_1.less_equal(v1_1))
+    assert(v1_0.less_equal(v1_1))
+    assert(v0_0.less_equal(v1_1))
+
+    assert(Antichain([v0_0]).less_equal(Antichain([v1_0])))
+    assert(Antichain([v0_0])._equals(Antichain([v1_0])) is not True)
+    assert(Antichain([v0_0]).less_than(Antichain([v1_0])))
+    assert(Antichain([v2_0, v1_1]).less_than(Antichain([v2_0])))
+
     graph = Graph(Antichain([Version([0, 0])]))
     input_a = graph.new_stream()
     output = input_a.map(lambda data: data + 5).filter(lambda data: data % 2 == 0)
@@ -761,14 +821,9 @@ if __name__ == '__main__':
 
     output = input_a.iterate(geometric_series).debug('output')
     output_listener = output.connect_to()
+    input_a.send_data(Version(0), Collection([(1, 1)]))
+    input_a.send_frontier(Antichain([Version(1)]))
+
     for i in range(0, 10):
-        input_a.send_data(Version(i), Collection([(i, 1)]))
-
-        a_frontier = Antichain([Version(i)])
-        input_a.send_frontier(a_frontier)
         graph.step()
-        #print(output_listener.drain())
-
-
-    for i in range(0, 100):
-        graph.step()
+    print('done done')
