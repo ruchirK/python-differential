@@ -1,13 +1,17 @@
 from collections import defaultdict
 from collection import Collection
 
+
 class Index:
     def __init__(self):
         self.inner = defaultdict(lambda: defaultdict(list))
         self.compaction_frontier = None
 
     def _validate(self, requested_version):
-       assert(self.compaction_frontier is None or requested_version >= self.compaction_frontier)
+        assert (
+            self.compaction_frontier is None
+            or requested_version >= self.compaction_frontier
+        )
 
     # TODO not sure this is exactly the right api.
     def reconstruct_before(self, key, requested_version):
@@ -17,7 +21,7 @@ class Index:
             if version < requested_version:
                 out.extend(values)
         return out
-    
+
     def reconstruct_at(self, key, requested_version):
         self._validate(requested_version)
         out = []
@@ -46,8 +50,15 @@ class Index:
         collections = defaultdict(list)
         for (key, versions) in self.inner.items():
             for (version, data) in versions.items():
-                collections[version].extend([((key, val), multiplicity) for (val, multiplicity) in data])
-        return CollectionTrace([(version, Collection(collection)) for (version, collection) in collections.items()])
+                collections[version].extend(
+                    [((key, val), multiplicity) for (val, multiplicity) in data]
+                )
+        return CollectionTrace(
+            [
+                (version, Collection(collection))
+                for (version, collection) in collections.items()
+            ]
+        )
 
     def join(self, other):
         collections = defaultdict(list)
@@ -61,24 +72,35 @@ class Index:
                     for (val1, mul1) in data1:
                         for (val2, mul2) in data2:
                             result_version = max(version1, version2)
-                            collections[result_version].append(((key, (val1, val2)), mul1 * mul2))
-        return [(version, Collection(c)) for (version, c) in collections.items() if c != []]
+                            collections[result_version].append(
+                                ((key, (val1, val2)), mul1 * mul2)
+                            )
+        return [
+            (version, Collection(c)) for (version, c) in collections.items() if c != []
+        ]
 
     def compact(self, compaction_version, keys=[]):
         self._validate(compaction_version)
+
         def consolidate_values(values):
             consolidated = defaultdict(int)
             for (value, multiplicity) in values:
-               consolidated[value] += multiplicity
+                consolidated[value] += multiplicity
 
-            return [(value, multiplicity) for (value, multiplicity) in consolidated.items() if multiplicity != 0]
-        
+            return [
+                (value, multiplicity)
+                for (value, multiplicity) in consolidated.items()
+                if multiplicity != 0
+            ]
+
         if keys == []:
             keys = [key for key in self.inner.keys()]
 
         for key in keys:
             versions = self.inner[key]
-            to_compact = [version for version in versions.keys() if version <= compaction_version]
+            to_compact = [
+                version for version in versions.keys() if version <= compaction_version
+            ]
             values = []
             for version in to_compact:
                 values.extend(versions.pop(version))
@@ -86,18 +108,23 @@ class Index:
             versions[compaction_version] = consolidate_values(values)
         self.compaction_frontier = compaction_version
 
+
 class CollectionTrace:
     def __init__(self, trace):
         self.trace = trace
 
     def __repr__(self):
-        return f'CollectionTrace({self.trace})'
+        return f"CollectionTrace({self.trace})"
 
     def map(self, f):
-        return CollectionTrace([(version, collection.map(f)) for (version, collection) in self.trace])
+        return CollectionTrace(
+            [(version, collection.map(f)) for (version, collection) in self.trace]
+        )
 
     def filter(self, f):
-        return CollectionTrace([(version, collection.filter(f)) for (version, collection) in self.trace])
+        return CollectionTrace(
+            [(version, collection.filter(f)) for (version, collection) in self.trace]
+        )
 
     def concat(self, other):
         out = []
@@ -106,7 +133,9 @@ class CollectionTrace:
         return CollectionTrace(out)
 
     def negate(self):
-        return CollectionTrace([(version, collection.negate()) for (version, collection) in self.trace])
+        return CollectionTrace(
+            [(version, collection.negate()) for (version, collection) in self.trace]
+        )
 
     def consolidate(self):
         collections = defaultdict(Collection)
@@ -119,15 +148,18 @@ class CollectionTrace:
             print(f"version: {version} collection: {collection}")
             consolidated[version] = collection.consolidate()
 
-        return CollectionTrace([(version, collection) for (version, collection) in consolidated.items()])
+        return CollectionTrace(
+            [(version, collection) for (version, collection) in consolidated.items()]
+        )
 
     def join(self, other):
         def join_inner(key, data1, data2):
             out = []
             for (v1, m1) in data1:
-               for (v2, m2)  in data2:
-                  out.append(((key, (v1, v2)), m1 * m2))
+                for (v2, m2) in data2:
+                    out.append(((key, (v1, v2)), m1 * m2))
             return out
+
         index_a = Index()
         index_b = Index()
         out = []
@@ -137,7 +169,7 @@ class CollectionTrace:
             for ((key, value), multiplicity) in collection.inner:
                 index_a.add_value(key, version, (value, multiplicity))
                 keys_todo[version].add(key)
-        
+
         for (version, collection) in other.trace:
             for ((key, value), multiplicity) in collection.inner:
                 index_b.add_value(key, version, (value, multiplicity))
@@ -172,16 +204,21 @@ class CollectionTrace:
             for (val, multiplicity) in second:
                 result[val] += multiplicity
 
-            return [(val, multiplicity) for (val, multiplicity) in result.items() if multiplicity != 0]
+            return [
+                (val, multiplicity)
+                for (val, multiplicity) in result.items()
+                if multiplicity != 0
+            ]
+
         index = Index()
         index_out = Index()
         keys_todo = defaultdict(set)
-        
+
         for (version, collection) in self.trace:
             for ((key, value), multiplicity) in collection.inner:
                 index.add_value(key, version, (value, multiplicity))
                 keys_todo[version].add(key)
-        
+
         versions = [version for version in keys_todo.keys()]
         versions.sort()
 
@@ -193,7 +230,12 @@ class CollectionTrace:
                 delta = index.values(key, version)
                 vals = add_values(curr, delta)
                 result = f(vals)
-                curr_output_negated = [(val, -multiplicity) for (val, multiplicity) in index_out.reconstruct_before(key, version)]
+                curr_output_negated = [
+                    (val, -multiplicity)
+                    for (val, multiplicity) in index_out.reconstruct_before(
+                        key, version
+                    )
+                ]
                 output_delta = add_values(result, curr_output_negated)
                 index_out.add_values(key, version, output_delta)
             index.compact(version, keys)
@@ -213,7 +255,7 @@ class CollectionTrace:
         def sum_inner(vals):
             out = 0
             for (val, diff) in vals:
-                out += (val * diff)
+                out += val * diff
             return [(out, 1)]
 
         return self.reduce(sum_inner)
@@ -222,29 +264,32 @@ class CollectionTrace:
         def min_inner(vals):
             out = vals[0][0]
             for (val, diff) in vals:
-                assert(diff > 0)
+                assert diff > 0
                 if val < out:
                     out = val
             return [(out, 1)]
+
         return self.reduce(min_inner)
 
     def max(self):
         def max_inner(vals):
             out = vals[0][0]
             for (val, diff) in vals:
-                assert(diff > 0)
+                assert diff > 0
                 if val > out:
                     out = val
             return [(out, 1)]
+
         return self.reduce(max_inner)
 
     def distinct(self):
         def distinct_inner(vals):
             v = set()
             for (val, diff) in vals:
-                assert(diff > 0)
+                assert diff > 0
                 v.add(val)
             return [(val, 1) for val in v]
+
         return self.reduce(distinct_inner)
 
     def interate(selfi, f):
@@ -266,18 +311,33 @@ class CollectionTrace:
 
         return CollectionTrace(ret)
 
-if __name__ == '__main__':
-    a = Collection([(('apple', '$5'), 3), (('banana', '$2'), 1)])
-    b = Collection([(('apple', '$3'), 1), (('apple', '$2'), 1), (('kiwi', '$2'), 1)])
-    c = Collection([(('apple', '$5'), 2), (('banana', '$2'), 1), (('apple', '$2'), 20)])
-    d = Collection([(('apple', 11), 1), (('apple', 3), 2), (('banana', 2), 3), (('coconut', 3), 1)])
+
+if __name__ == "__main__":
+    a = Collection([(("apple", "$5"), 3), (("banana", "$2"), 1)])
+    b = Collection([(("apple", "$3"), 1), (("apple", "$2"), 1), (("kiwi", "$2"), 1)])
+    c = Collection([(("apple", "$5"), 2), (("banana", "$2"), 1), (("apple", "$2"), 20)])
+    d = Collection(
+        [(("apple", 11), 1), (("apple", 3), 2), (("banana", 2), 3), (("coconut", 3), 1)]
+    )
     e = Collection([(1, 1)])
 
-    trace_a = CollectionTrace([(0, a), (1, Collection([(('apple', '$5'), -1), (('apple', '$7'), 1)])), (2, Collection([(('lemon', '$1'), 1)]))])
+    trace_a = CollectionTrace(
+        [
+            (0, a),
+            (1, Collection([(("apple", "$5"), -1), (("apple", "$7"), 1)])),
+            (2, Collection([(("lemon", "$1"), 1)])),
+        ]
+    )
     print(trace_a.map(lambda data: (data[1], data[0])))
-    print(trace_a.filter(lambda data: data[0] != 'apple'))
+    print(trace_a.filter(lambda data: data[0] != "apple"))
 
-    trace_b = CollectionTrace([(0, b), (1, Collection([])), (2, Collection([(('lemon', '$22'), 3), (('kiwi', '$1'), 2)]))])
+    trace_b = CollectionTrace(
+        [
+            (0, b),
+            (1, Collection([])),
+            (2, Collection([(("lemon", "$22"), 3), (("kiwi", "$1"), 2)])),
+        ]
+    )
     print(trace_a.join(trace_b))
     print(trace_a.join(trace_b).consolidate())
     print(trace_a.min())
