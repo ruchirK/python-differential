@@ -28,11 +28,11 @@ class CollectionStreamWriter:
 
     def send_data(self, version, collection):
         for q in self._queues:
-            q.appendleft((MessageType.DATA, version, collection))
+            q.appendleft((MessageType.DATA, (version, collection)))
 
     def send_frontier(self, frontier):
         for q in self._queues:
-            q.appendleft((MessageType.FRONTIER, frontier, []))
+            q.appendleft((MessageType.FRONTIER, frontier))
 
     def _new_reader(self):
         q = deque()

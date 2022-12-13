@@ -185,13 +185,14 @@ class GraphBuilder:
 class LinearUnaryOperator(UnaryOperator):
     def __init__(self, input_a, output, f, initial_frontier):
         def inner():
-            for (typ, version, collection) in self.input_messages():
+            for (typ, msg) in self.input_messages():
                 if typ == MessageType.DATA:
-                    result = f(collection)
-                    self.output.send_data(version, result)
+                    version, collection = msg
+                    self.output.send_data(version, f(collection))
                 elif typ == MessageType.FRONTIER:
-                    assert self.input_frontier().less_equal(version)
-                    self.set_input_frontier(version)
+                    frontier = msg
+                    assert self.input_frontier().less_equal(frontier)
+                    self.set_input_frontier(frontier)
 
             assert self.output_frontier.less_equal(self.input_frontier())
             if self.output_frontier.less_than(self.input_frontier()):
@@ -228,18 +229,22 @@ class NegateOperator(LinearUnaryOperator):
 class ConcatOperator(BinaryOperator):
     def __init__(self, input_a, input_b, output, initial_frontier):
         def inner():
-            for (typ, version, collection) in self.input_a_messages():
+            for (typ, msg) in self.input_a_messages():
                 if typ == MessageType.DATA:
+                    version, collection = msg
                     self.output.send_data(version, collection)
                 elif typ == MessageType.FRONTIER:
-                    assert self.input_a_frontier().less_equal(version)
-                    self.set_input_a_frontier(version)
-            for (typ, version, collection) in self.input_b_messages():
+                    frontier = msg
+                    assert self.input_a_frontier().less_equal(frontier)
+                    self.set_input_a_frontier(frontier)
+            for (typ, msg) in self.input_b_messages():
                 if typ == MessageType.DATA:
+                    version, collection = msg
                     self.output.send_data(version, collection)
                 elif typ == MessageType.FRONTIER:
-                    assert self.input_b_frontier().less_equal(version)
-                    self.set_input_b_frontier(version)
+                    frontier = msg
+                    assert self.input_b_frontier().less_equal(frontier)
+                    self.set_input_b_frontier(frontier)
 
             input_frontier = self.input_a_frontier().meet(self.input_b_frontier())
             assert self.output_frontier.less_equal(input_frontier)
@@ -255,12 +260,14 @@ class ConsolidateOperator(UnaryOperator):
         self.collections = defaultdict(Collection)
 
         def inner():
-            for (typ, version, collection) in self.input_messages():
+            for (typ, msg) in self.input_messages():
                 if typ == MessageType.DATA:
+                    version, collection = msg
                     self.collections[version]._extend(collection)
                 elif typ == MessageType.FRONTIER:
-                    assert self.input_frontier().less_equal(version)
-                    self.set_input_frontier(version)
+                    frontier = msg
+                    assert self.input_frontier().less_equal(frontier)
+                    self.set_input_frontier(frontier)
             finished_versions = [
                 version
                 for version in self.collections.keys()
@@ -280,16 +287,18 @@ class ConsolidateOperator(UnaryOperator):
 class DebugOperator(UnaryOperator):
     def __init__(self, input_a, output, name, initial_frontier):
         def inner():
-            for (typ, version, collection) in self.input_messages():
+            for (typ, msg) in self.input_messages():
                 if typ == MessageType.DATA:
+                    version, collection = msg
                     print(
                         f"debug {name} data: version: {version} collection: {collection}"
                     )
                     self.output.send_data(version, collection)
                 elif typ == MessageType.FRONTIER:
-                    assert self.input_frontier().less_equal(version)
-                    self.set_input_frontier(version)
-                    print(f"debug {name} notification: frontier {version}")
+                    frontier = msg
+                    assert self.input_frontier().less_equal(frontier)
+                    self.set_input_frontier(frontier)
+                    print(f"debug {name} notification: frontier {frontier}")
                     assert self.output_frontier.less_equal(self.input_frontier())
                     if self.output_frontier.less_than(self.input_frontier()):
                         self.output_frontier = self.input_frontier()
@@ -306,20 +315,24 @@ class JoinOperator(BinaryOperator):
         def inner():
             delta_a = Index()
             delta_b = Index()
-            for (typ, version, collection) in self.input_a_messages():
+            for (typ, msg) in self.input_a_messages():
                 if typ == MessageType.DATA:
+                    version, collection = msg
                     for ((key, value), multiplicity) in collection._inner:
                         delta_a.add_value(key, version, (value, multiplicity))
                 elif typ == MessageType.FRONTIER:
-                    assert self.input_a_frontier().less_equal(version)
-                    self.set_input_a_frontier(version)
-            for (typ, version, collection) in self.input_b_messages():
+                    frontier = msg
+                    assert self.input_a_frontier().less_equal(frontier)
+                    self.set_input_a_frontier(frontier)
+            for (typ, msg) in self.input_b_messages():
                 if typ == MessageType.DATA:
+                    version, collection = msg
                     for ((key, value), multiplicity) in collection._inner:
                         delta_b.add_value(key, version, (value, multiplicity))
                 elif typ == MessageType.FRONTIER:
-                    assert self.input_b_frontier().less_equal(version)
-                    self.set_input_b_frontier(version)
+                    frontier = msg
+                    assert self.input_b_frontier().less_equal(frontier)
+                    self.set_input_b_frontier(frontier)
 
             results = defaultdict(Collection)
             for (version, collection) in delta_a.join(self.index_b):
@@ -339,7 +352,6 @@ class JoinOperator(BinaryOperator):
             if self.output_frontier.less_than(input_frontier):
                 self.output_frontier = input_frontier
                 self.output.send_frontier(self.output_frontier)
-                # TODO not sure about this compaction logic
                 self.index_a.compact(self.output_frontier)
                 self.index_b.compact(self.output_frontier)
 
@@ -366,8 +378,9 @@ class ReduceOperator(UnaryOperator):
             ]
 
         def inner():
-            for (typ, version, collection) in self.input_messages():
+            for (typ, msg) in self.input_messages():
                 if typ == MessageType.DATA:
+                    version, collection = msg
                     for ((key, value), multiplicity) in collection._inner:
                         self.index.add_value(key, version, (value, multiplicity))
                         self.keys_todo[version].add(key)
@@ -375,8 +388,9 @@ class ReduceOperator(UnaryOperator):
                             new_version = version.join(v2)
                             self.keys_todo[version.join(v2)].add(key)
                 elif typ == MessageType.FRONTIER:
-                    assert self.input_frontier().less_equal(version)
-                    self.set_input_frontier(version)
+                    frontier = msg
+                    assert self.input_frontier().less_equal(frontier)
+                    self.set_input_frontier(frontier)
 
             finished_versions = [
                 version
@@ -438,13 +452,15 @@ class FeedbackOperator(UnaryOperator):
         self.versions_with_data = set()
 
         def inner():
-            for (typ, version, collection) in self.input_messages():
+            for (typ, msg) in self.input_messages():
                 if typ == MessageType.DATA:
+                    version, collection = msg
                     self.output.send_data(version.apply_step(step), collection)
                     self.versions_with_data.add(version.apply_step(step))
                 elif typ == MessageType.FRONTIER:
-                    assert self.input_frontier().less_equal(version)
-                    self.set_input_frontier(version)
+                    frontier = msg
+                    assert self.input_frontier().less_equal(frontier)
+                    self.set_input_frontier(frontier)
 
             candidate_output_frontier = self.input_frontier().apply_step(step)
             # TODO XXX not sure about this!
@@ -477,15 +493,17 @@ class FeedbackOperator(UnaryOperator):
 class IngressOperator(UnaryOperator):
     def __init__(self, input_a, output, initial_frontier):
         def inner():
-            for (typ, version, collection) in self.input_messages():
+            for (typ, msg) in self.input_messages():
                 if typ == MessageType.DATA:
+                    version, collection = msg
                     new_version = version.extend()
                     self.output.send_data(new_version, collection)
                     self.output.send_data(
                         new_version.apply_step(1), collection.negate()
                     )
                 elif typ == MessageType.FRONTIER:
-                    new_frontier = version.extend()
+                    frontier = msg
+                    new_frontier = frontier.extend()
                     assert self.input_frontier().less_equal(new_frontier)
                     self.set_input_frontier(new_frontier)
 
@@ -500,12 +518,14 @@ class IngressOperator(UnaryOperator):
 class EgressOperator(UnaryOperator):
     def __init__(self, input_a, output, initial_frontier):
         def inner():
-            for (typ, version, collection) in self.input_messages():
+            for (typ, msg) in self.input_messages():
                 if typ == MessageType.DATA:
+                    version, collection = msg
                     new_version = version.truncate()
                     self.output.send_data(new_version, collection)
                 elif typ == MessageType.FRONTIER:
-                    new_frontier = version.truncate()
+                    frontier = msg
+                    new_frontier = frontier.truncate()
                     assert self.input_frontier().less_equal(new_frontier)
                     self.set_input_frontier(new_frontier)
 
