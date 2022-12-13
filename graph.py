@@ -1,3 +1,45 @@
+from collections import deque
+from enum import Enum
+
+
+class MessageType(Enum):
+    DATA = 1
+    FRONTIER = 2
+
+
+class CollectionStreamReader:
+    def __init__(self, queue):
+        self._queue = queue
+
+    def drain(self):
+        out = []
+        while len(self._queue) > 0:
+            out.append(self._queue.pop())
+
+        return out
+
+    def is_empty(self):
+        return len(self._queue) == 0
+
+
+class CollectionStreamWriter:
+    def __init__(self):
+        self._queues = []
+
+    def send_data(self, version, collection):
+        for q in self._queues:
+            q.appendleft((MessageType.DATA, version, collection))
+
+    def send_frontier(self, frontier):
+        for q in self._queues:
+            q.appendleft((MessageType.FRONTIER, frontier, []))
+
+    def _new_reader(self):
+        q = deque()
+        self._queues.append(q)
+        return CollectionStreamReader(q)
+
+
 class Operator:
     def __init__(self, inputs, output, f, initial_frontier):
         self.inputs = inputs
@@ -57,3 +99,13 @@ class BinaryOperator(Operator):
 
     def set_input_b_frontier(self, frontier):
         self.input_frontiers[1] = frontier
+
+
+class Graph:
+    def __init__(self, streams, operators):
+        self.streams = streams
+        self.operators = operators
+
+    def step(self):
+        for op in self.operators:
+            op.run()

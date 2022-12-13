@@ -1,120 +1,116 @@
-from collections import defaultdict, deque
-from enum import Enum
-import random
+from collections import defaultdict
 
-from base_operator import UnaryOperator, BinaryOperator
 from collection import Collection
+from graph import (
+    BinaryOperator,
+    CollectionStreamReader,
+    CollectionStreamWriter,
+    Graph,
+    MessageType,
+    UnaryOperator,
+)
 from index import Index1D as Index
 
 
-class MessageType(Enum):
-    DATA = 1
-    FRONTIER = 2
-
-
-class CollectionStreamListener:
-    def __init__(self, queue):
-        self.inner = queue
-
-    def drain(self):
-        out = []
-        while len(self.inner) > 0:
-            out.append(self.inner.pop())
-
-        return out
-
-    def is_empty(self):
-        return len(self.queue) == 0
-
-
-class CollectionStream:
+class CollectionStreamBuilder:
     def __init__(self, graph):
-        self.queues = []
+        self._writer = CollectionStreamWriter()
         self.graph = graph
 
-    def send_data(self, version, collection):
-        for q in self.queues:
-            q.appendleft((MessageType.DATA, version, collection))
+    def connect_reader(self):
+        return self._writer._new_reader()
 
-    def send_frontier(self, frontier):
-        for q in self.queues:
-            q.appendleft((MessageType.FRONTIER, frontier, []))
-
-    def connect_to(self):
-        q = deque()
-        self.queues.append(q)
-        return CollectionStreamListener(q)
+    def writer(self):
+        return self._writer
 
     def map(self, f):
-        output = self.graph.new_stream()
-        map_operator = MapOperator(self.connect_to(), output, f, self.graph.frontier())
-        self.graph.add_operator(map_operator)
+        output = CollectionStreamBuilder(self.graph)
+        operator = MapOperator(
+            self.connect_reader(), output.writer(), f, self.graph.frontier()
+        )
+        self.graph.add_operator(operator)
+        self.graph.add_stream(output.connect_reader())
         return output
 
     def filter(self, f):
-        output = self.graph.new_stream()
-        filter_operator = FilterOperator(
-            self.connect_to(), output, f, self.graph.frontier()
+        output = CollectionStreamBuilder(self.graph)
+        operator = FilterOperator(
+            self.connect_reader(), output.writer(), f, self.graph.frontier()
         )
-        self.graph.add_operator(filter_operator)
+        self.graph.add_operator(operator)
+        self.graph.add_stream(output.connect_reader())
         return output
 
-    def negate(
-        self,
-    ):
-        output = self.graph.new_stream()
-        negate_operator = NegateOperator(
-            self.connect_to(), output, self.graph.frontier()
+    def negate(self):
+        output = CollectionStreamBuilder(self.graph)
+        operator = NegateOperator(
+            self.connect_reader(), output.writer(), self.graph.frontier()
         )
-        self.graph.add_operator(negate_operator)
-        return output
-
-    def debug(self, name=""):
-        output = self.graph.new_stream()
-        debug_operator = DebugOperator(
-            self.connect_to(), output, name, self.graph.frontier()
-        )
-        self.graph.add_operator(debug_operator)
+        self.graph.add_operator(operator)
+        self.graph.add_stream(output.connect_reader())
         return output
 
     def concat(self, other):
-        # TODO check that these are edges on the same graph
-        output = self.graph.new_stream()
-        concat_operator = ConcatOperator(
-            self.connect_to(), other.connect_to(), output, self.graph.frontier()
+        assert id(self.graph) == id(other.graph)
+        output = CollectionStreamBuilder(self.graph)
+        operator = ConcatOperator(
+            self.connect_reader(),
+            other.connect_reader(),
+            output.writer(),
+            self.graph.frontier(),
         )
-        self.graph.add_operator(concat_operator)
+        self.graph.add_operator(operator)
+        self.graph.add_stream(output.connect_reader())
+        return output
+
+    def debug(self, name=""):
+        output = CollectionStreamBuilder(self.graph)
+        operator = DebugOperator(
+            self.connect_reader(), output.writer(), name, self.graph.frontier()
+        )
+        self.graph.add_operator(operator)
+        self.graph.add_stream(output.connect_reader())
         return output
 
     def join(self, other):
-        # TODO check that these are edges on the same graph
-        output = self.graph.new_stream()
-        join_operator = JoinOperator(
-            self.connect_to(), other.connect_to(), output, self.graph.frontier()
+        assert id(self.graph) == id(other.graph)
+        output = CollectionStreamBuilder(self.graph)
+        operator = JoinOperator(
+            self.connect_reader(),
+            other.connect_reader(),
+            output.writer(),
+            self.graph.frontier(),
         )
-        self.graph.add_operator(join_operator)
+        self.graph.add_operator(operator)
+        self.graph.add_stream(output.connect_reader())
         return output
 
     def count(self):
-        output = self.graph.new_stream()
-        count_operator = CountOperator(self.connect_to(), output, self.graph.frontier())
-        self.graph.add_operator(count_operator)
+        output = CollectionStreamBuilder(self.graph)
+        operator = CountOperator(
+            self.connect_reader(), output.writer(), self.graph.frontier()
+        )
+        self.graph.add_operator(operator)
+        self.graph.add_stream(output.connect_reader())
         return output
 
 
-class Graph:
+class GraphBuilder:
     def __init__(self, initial_frontier):
         self.streams = []
         self.operators = []
         self.frontier_stack = [initial_frontier]
 
-    def new_stream(self):
-        input_stream = CollectionStream(self)
-        self.streams.append(input_stream)
-        return input_stream
+    def new_input(self):
+        stream_builder = CollectionStreamBuilder(self)
+        self.streams.append(stream_builder.connect_reader())
+        return stream_builder, stream_builder.writer()
 
     def add_operator(self, operator):
         self.operators.append(operator)
+
+    def add_stream(self, stream):
+        self.streams.append(stream)
 
     def frontier(self):
         return self.frontier_stack[-1]
@@ -125,9 +121,8 @@ class Graph:
     def pop_frontier(self):
         self.frontier_stack.pop()
 
-    def step(self):
-        for op in self.operators:
-            op.run()
+    def finalize(self):
+        return Graph(self.streams, self.operators)
 
 
 class LinearUnaryOperator(UnaryOperator):
@@ -328,29 +323,31 @@ class CountOperator(ReduceOperator):
 
 
 if __name__ == "__main__":
-    graph = Graph(0)
-    input_a = graph.new_stream()
+    graph_builder = GraphBuilder(0)
+    input_a, input_a_writer = graph_builder.new_input()
     output = input_a.map(lambda data: data + 5).filter(lambda data: data % 2 == 0)
     input_a.negate().concat(output).debug("output")
+    graph = graph_builder.finalize()
 
     for i in range(0, 10):
-        input_a.send_data(i, Collection([(i, 1)]))
-        input_a.send_frontier(i)
+        input_a_writer.send_data(i, Collection([(i, 1)]))
+        input_a_writer.send_frontier(i)
         graph.step()
-    graph = Graph(0)
-    input_a = graph.new_stream()
-    input_b = graph.new_stream()
+    graph_builder = GraphBuilder(0)
+    input_a, input_a_writer = graph_builder.new_input()
+    input_b, input_b_writer = graph_builder.new_input()
 
     output = input_a.join(input_b).count().debug("count")
+    graph = graph_builder.finalize()
 
     for i in range(0, 10):
-        input_a.send_data(i, Collection([((1, i), 2)]))
-        input_a.send_data(i, Collection([((2, i), 2)]))
-        input_b.send_data(i, Collection([((1, i + 2), 2)]))
-        input_b.send_data(i, Collection([((2, i + 3), 2)]))
-        input_a.send_frontier(i)
-        input_b.send_frontier(i)
+        input_a_writer.send_data(i, Collection([((1, i), 2)]))
+        input_a_writer.send_data(i, Collection([((2, i), 2)]))
+        input_b_writer.send_data(i, Collection([((1, i + 2), 2)]))
+        input_b_writer.send_data(i, Collection([((2, i + 3), 2)]))
+        input_a_writer.send_frontier(i)
+        input_b_writer.send_frontier(i)
         graph.step()
-    input_a.send_frontier(11)
-    input_b.send_frontier(11)
+    input_a_writer.send_frontier(11)
+    input_b_writer.send_frontier(11)
     graph.step()
