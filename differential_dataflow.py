@@ -2,115 +2,8 @@ from collections import defaultdict, deque
 
 from collection import Collection
 from differential_dataflow_1d import MessageType, CollectionStreamListener
-
-
-class Index:
-    def __init__(self):
-        self.inner = defaultdict(lambda: defaultdict(list))
-        # TODO: take an initial time?
-        self.compaction_frontier = None
-
-    def _validate(self, requested_version):
-        if self.compaction_frontier is None:
-            return True
-        if isinstance(requested_version, Antichain):
-            assert self.compaction_frontier.less_equal(requested_version)
-        elif isinstance(requested_version, Version):
-            assert self.compaction_frontier.less_equal_version(requested_version)
-
-    def reconstruct_at(self, key, requested_version):
-        self._validate(requested_version)
-        out = []
-        for (version, values) in self.inner[key].items():
-            if version.less_equal(requested_version):
-                out.extend(values)
-        return out
-
-    def values(self, key, version):
-        return self.inner[key][version]
-
-    def versions(self, key):
-        return [version for version in self.inner[key].keys()]
-
-    def add_value(self, key, version, value):
-        self._validate(version)
-        self.inner[key][version].append(value)
-
-    def append(self, other):
-        for (key, versions) in other.inner.items():
-            for (version, data) in versions.items():
-                self.inner[key][version].extend(data)
-
-    def to_trace(self):
-        collections = defaultdict(list)
-        for (key, versions) in self.inner.items():
-            for (version, data) in versions.items():
-                collections[version].extend(
-                    [((key, val), multiplicity) for (val, multiplicity) in data]
-                )
-        return CollectionTrace(
-            [
-                (version, Collection(collection))
-                for (version, collection) in collections.items()
-            ]
-        )
-
-    def join(self, other):
-        collections = defaultdict(list)
-        for (key, versions) in self.inner.items():
-            if key not in other.inner:
-                continue
-            other_versions = other.inner[key]
-
-            for (version1, data1) in versions.items():
-                for (version2, data2) in other_versions.items():
-                    for (val1, mul1) in data1:
-                        for (val2, mul2) in data2:
-                            result_version = version1.join(version2)
-                            collections[result_version].append(
-                                ((key, (val1, val2)), mul1 * mul2)
-                            )
-        return [
-            (version, Collection(c)) for (version, c) in collections.items() if c != []
-        ]
-
-    def compact(self, compaction_frontier, keys=[]):
-        self._validate(compaction_frontier)
-
-        def consolidate_values(values):
-            consolidated = defaultdict(int)
-            for (value, multiplicity) in values:
-                consolidated[value] += multiplicity
-
-            return [
-                (value, multiplicity)
-                for (value, multiplicity) in consolidated.items()
-                if multiplicity != 0
-            ]
-
-        if keys == []:
-            keys = [key for key in self.inner.keys()]
-
-        for key in keys:
-            versions = self.inner[key]
-            to_compact = [
-                version
-                for version in versions.keys()
-                if compaction_frontier.less_equal_version(version) is not True
-            ]
-            to_consolidate = set()
-            for version in to_compact:
-                values = versions.pop(version)
-                new_version = version.advance_by(compaction_frontier)
-                versions[new_version].extend(values)
-                to_consolidate.add(new_version)
-            for version in to_consolidate:
-                values = versions.pop(version)
-                versions[version] = consolidate_values(values)
-        assert self.compaction_frontier is None or self.compaction_frontier.less_equal(
-            compaction_frontier
-        )
-        self.compaction_frontier = compaction_frontier
+from order import Version, Antichain
+from index import Index
 
 
 class Graph:
@@ -147,12 +40,10 @@ class CollectionStream:
         self.graph = graph
 
     def send_data(self, version, collection):
-        assert len(self.queues) > 0
         for q in self.queues:
             q.appendleft((MessageType.DATA, version, collection))
 
     def send_frontier(self, frontier):
-        assert len(self.queues) > 0
         for q in self.queues:
             q.appendleft((MessageType.FRONTIER, frontier, []))
 
@@ -261,183 +152,6 @@ class CollectionStream:
         )
         self.graph.add_operator(feedback_operator)
         return result._leave()
-
-
-class Version:
-    def __init__(self, version):
-        if isinstance(version, int):
-            assert version >= 0
-            self.inner = (version,)
-        elif isinstance(version, list) or isinstance(version, tuple):
-            for i in version:
-                assert isinstance(i, int)
-                assert i >= 0
-            self.inner = tuple(version)
-        else:
-            assert 0 > 1
-
-    def __repr__(self):
-        return f"Version({self.inner})"
-
-    def __eq__(self, other):
-        return self.inner == other.inner
-
-    # TODO need to make sure it respects partial order
-    def __lt__(self, other):
-        return self.inner.__lt__(other.inner)
-
-    def __hash__(self):
-        return hash(self.inner)
-
-    def _validate(self, other):
-        assert len(self.inner) > 0
-        assert len(self.inner) == len(other.inner)
-
-    def less_equal(self, other):
-        self._validate(other)
-
-        for (i1, i2) in zip(self.inner, other.inner):
-            if i1 > i2:
-                return False
-        return True
-
-    def less_than(self, other):
-        if self.less_equal(other) is True and self.inner != other.inner:
-            return True
-        return False
-
-    def join(self, other):
-        self._validate(other)
-        out = []
-
-        for (i1, i2) in zip(self.inner, other.inner):
-            out.append(max(i1, i2))
-        return Version(out)
-
-    def meet(self, other):
-        self._validate(other)
-        out = []
-
-        for (i1, i2) in zip(self.inner, other.inner):
-            out.append(min(i1, i2))
-        return Version(out)
-
-    # TODO the proof for this is in the sharing arrangements paper.
-    def advance_by(self, frontier):
-        if frontier.inner == ():
-            return self
-        result = frontier.inner[0]
-        for elem in frontier.inner:
-            result = result.meet(self.join(elem))
-        return result
-
-    def extend(self):
-        elements = [e for e in self.inner]
-        elements.append(0)
-        return Version(elements)
-
-    def truncate(self):
-        elements = [e for e in self.inner]
-        elements.pop()
-        return Version(elements)
-
-    def apply_step(self, step):
-        assert step > 0
-        elements = [e for e in self.inner]
-        elements[-1] += step
-        return Version(elements)
-
-
-# This keeps the min antichain.
-# I fully stole this from frank. TODO: Understand this better
-class Antichain:
-    def __init__(self, elements):
-        self.inner = []
-        for element in elements:
-            self._insert(element)
-
-    def __repr__(self):
-        return f"Antichain({self.inner})"
-
-    def _insert(self, element):
-        for e in self.inner:
-            if e.less_equal(element):
-                return
-        self.inner = [x for x in self.inner if element.less_equal(x) is not True]
-        self.inner.append(element)
-
-    # TODO: is it true that the set of versions <= meet(x, y) is the intersection of the set of versions <= x and the set of versions <= y?
-    def meet(self, other):
-        out = Antichain([])
-        for element in self.inner:
-            out._insert(element)
-        for element in other.inner:
-            out._insert(element)
-
-        return out
-
-    def _equals(self, other):
-        elements_1 = [x for x in self.inner]
-        elements_2 = [y for y in other.inner]
-
-        if len(elements_1) != len(elements_2):
-            return False
-        elements_1.sort()
-        elements_2.sort()
-
-        for (x, y) in zip(elements_1, elements_2):
-            if x != y:
-                return False
-        return True
-
-    # Returns true if other dominates self
-    # in other words self < other means
-    # self <= other AND self != other
-    def less_than(self, other):
-        if self.less_equal(other) is not True:
-            return False
-
-        if self._equals(other):
-            return False
-
-        return True
-
-    def less_equal(self, other):
-        for o in other.inner:
-            less_equal = False
-            for s in self.inner:
-                if s.less_equal(o):
-                    less_equal = True
-            if less_equal == False:
-                return False
-        return True
-
-    def less_equal_version(self, version):
-        for elem in self.inner:
-            if elem.less_equal(version):
-                return True
-        return False
-
-    def extend(self):
-        out = Antichain([])
-        for elem in self.inner:
-            out._insert(elem.extend())
-        return out
-
-    def truncate(self):
-        out = Antichain([])
-        for elem in self.inner:
-            out._insert(elem.truncate())
-        return out
-
-    def apply_step(self, step):
-        out = Antichain([])
-        for elem in self.inner:
-            out._insert(elem.apply_step(step))
-        return out
-
-    def _elements(self):
-        return [x for x in self.inner]
 
 
 class Operator:
@@ -627,14 +341,14 @@ class JoinOperator(BinaryOperator):
             delta_b = Index()
             for (typ, version, collection) in self.input_a_messages():
                 if typ == MessageType.DATA:
-                    for ((key, value), multiplicity) in collection.inner:
+                    for ((key, value), multiplicity) in collection._inner:
                         delta_a.add_value(key, version, (value, multiplicity))
                 elif typ == MessageType.FRONTIER:
                     assert self.input_a_frontier().less_equal(version)
                     self.set_input_a_frontier(version)
             for (typ, version, collection) in self.input_b_messages():
                 if typ == MessageType.DATA:
-                    for ((key, value), multiplicity) in collection.inner:
+                    for ((key, value), multiplicity) in collection._inner:
                         delta_b.add_value(key, version, (value, multiplicity))
                 elif typ == MessageType.FRONTIER:
                     assert self.input_b_frontier().less_equal(version)
@@ -687,7 +401,7 @@ class ReduceOperator(UnaryOperator):
         def inner():
             for (typ, version, collection) in self.input_messages():
                 if typ == MessageType.DATA:
-                    for ((key, value), multiplicity) in collection.inner:
+                    for ((key, value), multiplicity) in collection._inner:
                         self.index.add_value(key, version, (value, multiplicity))
                         self.keys_todo[version].add(key)
                         for v2 in self.index.versions(key):
@@ -837,52 +551,21 @@ class EgressOperator(UnaryOperator):
 
 
 if __name__ == "__main__":
-
-    v0_0 = Version([0, 0])
-    v1_0 = Version([1, 0])
-    v0_1 = Version([0, 1])
-    v1_1 = Version([1, 1])
-    v2_0 = Version([2, 0])
-
-    assert v0_0.less_than(v1_0)
-    assert v0_0.less_than(v0_1)
-    assert v0_0.less_than(v1_1)
-    assert v0_0.less_equal(v1_0)
-    assert v0_0.less_equal(v0_1)
-    assert v0_0.less_equal(v1_1)
-
-    assert v1_0.less_than(v1_0) is not True
-    assert v1_0.less_equal(v1_0)
-    assert v1_0.less_equal(v0_1) is not True
-    assert v0_1.less_equal(v1_0) is not True
-    assert v0_1.less_equal(v1_1)
-    assert v1_0.less_equal(v1_1)
-    assert v0_0.less_equal(v1_1)
-
-    assert Antichain([v0_0]).less_equal(Antichain([v1_0]))
-    assert Antichain([v0_0])._equals(Antichain([v1_0])) is not True
-    assert Antichain([v0_0]).less_than(Antichain([v1_0]))
-    assert Antichain([v2_0, v1_1]).less_than(Antichain([v2_0]))
-
     graph = Graph(Antichain([Version([0, 0])]))
     input_a = graph.new_stream()
     output = input_a.map(lambda data: data + 5).filter(lambda data: data % 2 == 0)
-    final_output = input_a.negate().concat(output)
-    final_output_listener = final_output.connect_to()
+    input_a.negate().concat(output).debug("output")
 
     for i in range(0, 10):
         input_a.send_data(Version([0, i]), Collection([(i, 1)]))
         input_a.send_frontier(Antichain([Version([i, 0]), Version([0, i])]))
         graph.step()
-        print(final_output_listener.drain())
 
-    print("done")
     graph = Graph(Antichain([Version([0, 0])]))
     input_a = graph.new_stream()
     input_b = graph.new_stream()
 
-    output = input_a.join(input_b).count()
-    output_listener = output.connect_to()
+    input_a.join(input_b).count().debug("count")
 
     for i in range(0, 2):
         input_a.send_data(Version([0, i]), Collection([((1, i), 2)]))
@@ -894,12 +577,10 @@ if __name__ == "__main__":
         input_b.send_data(Version([i, 0]), Collection([((2, i + 3), 2)]))
         input_b.send_frontier(Antichain([Version([i, 0]), Version([0, i * 2])]))
         graph.step()
-        print(output_listener.drain())
 
     input_a.send_frontier(Antichain([Version([11, 11])]))
     input_b.send_frontier(Antichain([Version([11, 11])]))
     graph.step()
-    print(output_listener.drain())
     graph = Graph(Antichain([Version(0)]))
     input_a = graph.new_stream()
 
@@ -914,11 +595,9 @@ if __name__ == "__main__":
             .consolidate()
         )
 
-    output = input_a.iterate(geometric_series).debug("output")
-    output_listener = output.connect_to()
+    output = input_a.iterate(geometric_series).debug("iterate")
     input_a.send_data(Version(0), Collection([(1, 1)]))
     input_a.send_frontier(Antichain([Version(1)]))
 
     for i in range(0, 10):
         graph.step()
-    print("done done")

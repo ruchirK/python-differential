@@ -44,9 +44,9 @@ class Collection:
         )
 
     def consolidate(self):
-        """Physically modify the collection to combine identical instances of the same record into one (record, multiplicity) pair.
-
-        This operation does not logically change the the data contained in the collection.
+        """Produce as output a collection that is logically equivalent to the input
+        but which combines identical instances of the same record into one
+        (record, multiplicity) pair.
         """
         consolidated = defaultdict(int)
         for (data, multiplicity) in self._inner:
@@ -237,6 +237,5 @@ if __name__ == "__main__":
             .consolidate()
         )
 
-    collection = Collection([(1, 1)])
-    result = collection.iterate(add_one).map(lambda data: (data, data * data))
+    result = e.iterate(add_one).map(lambda data: (data, data * data))
     print(result)

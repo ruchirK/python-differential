@@ -3,7 +3,7 @@ from enum import Enum
 import random
 
 from collection import Collection
-from collection_trace import Index
+from index import Index1D as Index
 
 
 class MessageType(Enum):
@@ -32,12 +32,10 @@ class CollectionStream:
         self.graph = graph
 
     def send_data(self, version, collection):
-        assert len(self.queues) > 0
         for q in self.queues:
             q.appendleft((MessageType.DATA, version, collection))
 
     def send_frontier(self, frontier):
-        assert len(self.queues) > 0
         for q in self.queues:
             q.appendleft((MessageType.FRONTIER, frontier, []))
 
@@ -68,6 +66,14 @@ class CollectionStream:
             self.connect_to(), output, self.graph.frontier()
         )
         self.graph.add_operator(negate_operator)
+        return output
+
+    def debug(self, name=""):
+        output = self.graph.new_stream()
+        debug_operator = DebugOperator(
+            self.connect_to(), output, name, self.graph.frontier()
+        )
+        self.graph.add_operator(debug_operator)
         return output
 
     def concat(self, other):
@@ -247,6 +253,27 @@ class ConcatOperator(BinaryOperator):
         super().__init__(input_a, input_b, output, inner, initial_frontier)
 
 
+class DebugOperator(UnaryOperator):
+    def __init__(self, input_a, output, name, initial_frontier):
+        def inner():
+            for (typ, version, collection) in self.input_messages():
+                if typ == MessageType.DATA:
+                    print(
+                        f"debug {name} data: version: {version} collection: {collection}"
+                    )
+                    self.output.send_data(version, collection)
+                elif typ == MessageType.FRONTIER:
+                    assert self.input_frontier() <= version
+                    self.set_input_frontier(version)
+                    print(f"debug {name} notification: frontier {version}")
+                    assert self.output_frontier <= self.input_frontier()
+                    if self.output_frontier < self.input_frontier():
+                        self.output_frontier = self.input_frontier()
+                        self.output.send_frontier(self.output_frontier)
+
+        super().__init__(input_a, output, inner, initial_frontier)
+
+
 class JoinOperator(BinaryOperator):
     def __init__(self, input_a, input_b, output, initial_frontier):
         self.index_a = Index()
@@ -257,13 +284,13 @@ class JoinOperator(BinaryOperator):
             delta_b = Index()
             for (typ, version, collection) in self.input_a_messages():
                 if typ == MessageType.DATA:
-                    for ((key, value), multiplicity) in collection.inner:
+                    for ((key, value), multiplicity) in collection._inner:
                         delta_a.add_value(key, version, (value, multiplicity))
                 elif typ == MessageType.FRONTIER:
                     self.set_input_a_frontier(version)
             for (typ, version, collection) in self.input_b_messages():
                 if typ == MessageType.DATA:
-                    for ((key, value), multiplicity) in collection.inner:
+                    for ((key, value), multiplicity) in collection._inner:
                         delta_b.add_value(key, version, (value, multiplicity))
                 elif typ == MessageType.FRONTIER:
                     self.set_input_b_frontier(version)
@@ -313,7 +340,7 @@ class ReduceOperator(UnaryOperator):
         def inner():
             for (typ, version, collection) in self.input_messages():
                 if typ == MessageType.DATA:
-                    for ((key, value), multiplicity) in collection.inner:
+                    for ((key, value), multiplicity) in collection._inner:
                         self.index.add_value(key, version, (value, multiplicity))
                         self.keys_todo[version].add(key)
                 elif typ == MessageType.FRONTIER:
@@ -334,7 +361,6 @@ class ReduceOperator(UnaryOperator):
                     curr_out = self.index_out.reconstruct_at(key, version)
                     out = f(curr)
                     delta = subtract_values(out, curr_out)
-                    # print(f"key: {key} curr: {curr} curr_out: {curr_out} result: {result} delta: {delta}")
                     for (value, multiplicity) in delta:
                         result.append(((key, value), multiplicity))
                         self.index_out.add_value(key, version, (value, multiplicity))
@@ -365,21 +391,17 @@ if __name__ == "__main__":
     graph = Graph(0)
     input_a = graph.new_stream()
     output = input_a.map(lambda data: data + 5).filter(lambda data: data % 2 == 0)
-    final_output = input_a.negate().concat(output)
-    final_output_listener = final_output.connect_to()
+    input_a.negate().concat(output).debug("output")
 
     for i in range(0, 10):
         input_a.send_data(i, Collection([(i, 1)]))
         input_a.send_frontier(i)
         graph.step()
-        print(final_output_listener.drain())
-    print("done")
     graph = Graph(0)
     input_a = graph.new_stream()
     input_b = graph.new_stream()
 
-    output = input_a.join(input_b).count()
-    output_listener = output.connect_to()
+    output = input_a.join(input_b).count().debug("count")
 
     for i in range(0, 10):
         input_a.send_data(i, Collection([((1, i), 2)]))
@@ -389,8 +411,6 @@ if __name__ == "__main__":
         input_a.send_frontier(i)
         input_b.send_frontier(i)
         graph.step()
-        print(output_listener.drain())
     input_a.send_frontier(11)
     input_b.send_frontier(11)
     graph.step()
-    print(output_listener.drain())

@@ -1,151 +1,67 @@
+"""The implementation of a bounded, totally ordered sequence of collections
+(a bounded collection trace) as a bounded totally ordered sequence of differences.
+"""
+
 from collections import defaultdict
 from collection import Collection
-
-
-class Index:
-    def __init__(self):
-        self.inner = defaultdict(lambda: defaultdict(list))
-        self.compaction_frontier = None
-
-    def _validate(self, requested_version):
-        assert (
-            self.compaction_frontier is None
-            or requested_version >= self.compaction_frontier
-        )
-
-    # TODO not sure this is exactly the right api.
-    def reconstruct_before(self, key, requested_version):
-        self._validate(requested_version)
-        out = []
-        for (version, values) in self.inner[key].items():
-            if version < requested_version:
-                out.extend(values)
-        return out
-
-    def reconstruct_at(self, key, requested_version):
-        self._validate(requested_version)
-        out = []
-        for (version, values) in self.inner[key].items():
-            if version <= requested_version:
-                out.extend(values)
-        return out
-
-    def values(self, key, version):
-        return self.inner[key][version]
-
-    def add_value(self, key, version, value):
-        self._validate(version)
-        self.inner[key][version].append(value)
-
-    def add_values(self, key, version, values):
-        self._validate(version)
-        self.inner[key][version].extend(values)
-
-    def append(self, other):
-        for (key, versions) in other.inner.items():
-            for (version, data) in versions.items():
-                self.inner[key][version].extend(data)
-
-    def to_trace(self):
-        collections = defaultdict(list)
-        for (key, versions) in self.inner.items():
-            for (version, data) in versions.items():
-                collections[version].extend(
-                    [((key, val), multiplicity) for (val, multiplicity) in data]
-                )
-        return CollectionTrace(
-            [
-                (version, Collection(collection))
-                for (version, collection) in collections.items()
-            ]
-        )
-
-    def join(self, other):
-        collections = defaultdict(list)
-        for (key, versions) in self.inner.items():
-            if key not in other.inner:
-                continue
-            other_versions = other.inner[key]
-
-            for (version1, data1) in versions.items():
-                for (version2, data2) in other_versions.items():
-                    for (val1, mul1) in data1:
-                        for (val2, mul2) in data2:
-                            result_version = max(version1, version2)
-                            collections[result_version].append(
-                                ((key, (val1, val2)), mul1 * mul2)
-                            )
-        return [
-            (version, Collection(c)) for (version, c) in collections.items() if c != []
-        ]
-
-    def compact(self, compaction_version, keys=[]):
-        self._validate(compaction_version)
-
-        def consolidate_values(values):
-            consolidated = defaultdict(int)
-            for (value, multiplicity) in values:
-                consolidated[value] += multiplicity
-
-            return [
-                (value, multiplicity)
-                for (value, multiplicity) in consolidated.items()
-                if multiplicity != 0
-            ]
-
-        if keys == []:
-            keys = [key for key in self.inner.keys()]
-
-        for key in keys:
-            versions = self.inner[key]
-            to_compact = [
-                version for version in versions.keys() if version <= compaction_version
-            ]
-            values = []
-            for version in to_compact:
-                values.extend(versions.pop(version))
-
-            versions[compaction_version] = consolidate_values(values)
-        self.compaction_frontier = compaction_version
+from index import Index1D as Index
 
 
 class CollectionTrace:
+    """A bounded sequence of collections of data.
+
+    This class represents a difference collection trace, which is to say, the
+    collection at version N is logically meant to represent the difference
+    between an input collection at version N and an input collection at N - 1.
+    This representation is designed for the case where the differences between
+    consecutive collections in the input sequence are small, and so storing the
+    sequence of differences is both space efficient, and enables efficient
+    computation of the sequence of output differences.
+    """
+
     def __init__(self, trace):
-        self.trace = trace
+        self._trace = trace
 
     def __repr__(self):
-        return f"CollectionTrace({self.trace})"
+        return f"CollectionTrace({self._trace})"
 
     def map(self, f):
+        """Apply a function to all records in the collection trace."""
         return CollectionTrace(
-            [(version, collection.map(f)) for (version, collection) in self.trace]
+            [(version, collection.map(f)) for (version, collection) in self._trace]
         )
 
     def filter(self, f):
+        """Filter out records where f(record) evaluates to False from all
+        collections in the collection trace.
+        """
         return CollectionTrace(
-            [(version, collection.filter(f)) for (version, collection) in self.trace]
+            [(version, collection.filter(f)) for (version, collection) in self._trace]
         )
 
     def concat(self, other):
+        """Concatenate two collection traces together."""
         out = []
-        out.extend(self.trace)
-        out.extend(other.trace)
+        out.extend(self._trace)
+        out.extend(other._trace)
         return CollectionTrace(out)
 
     def negate(self):
         return CollectionTrace(
-            [(version, collection.negate()) for (version, collection) in self.trace]
+            [(version, collection.negate()) for (version, collection) in self._trace]
         )
 
     def consolidate(self):
+        """Produce as output a collection trace where each collection in the trace
+        is consolidated.
+        """
         collections = defaultdict(Collection)
 
-        for (version, collection) in self.trace:
+        for (version, collection) in self._trace:
             collections[version]._extend(collection)
 
         consolidated = {}
         for (version, collection) in collections.items():
-            print(f"version: {version} collection: {collection}")
             consolidated[version] = collection.consolidate()
 
         return CollectionTrace(
@@ -153,56 +69,34 @@ class CollectionTrace:
         )
 
     def join(self, other):
-        def join_inner(key, data1, data2):
-            out = []
-            for (v1, m1) in data1:
-                for (v2, m2) in data2:
-                    out.append(((key, (v1, v2)), m1 * m2))
-            return out
-
         index_a = Index()
         index_b = Index()
         out = []
-        keys_todo = defaultdict(set)
 
-        for (version, collection) in self.trace:
-            for ((key, value), multiplicity) in collection.inner:
+        for (version, collection) in self._trace:
+            for ((key, value), multiplicity) in collection._inner:
                 index_a.add_value(key, version, (value, multiplicity))
-                keys_todo[version].add(key)
 
-        for (version, collection) in other.trace:
-            for ((key, value), multiplicity) in collection.inner:
+        for (version, collection) in other._trace:
+            for ((key, value), multiplicity) in collection._inner:
                 index_b.add_value(key, version, (value, multiplicity))
-                keys_todo[version].add(key)
 
-        versions = [version for version in keys_todo.keys()]
-        versions.sort()
-
-        for version in versions:
-            keys = keys_todo[version]
-            result = []
-            for key in keys:
-                a = index_a.reconstruct_before(key, version)
-                b = index_b.reconstruct_before(key, version)
-                delta_a = index_a.values(key, version)
-                delta_b = index_b.values(key, version)
-                result.extend(join_inner(key, a, delta_b))
-                result.extend(join_inner(key, delta_a, b))
-                result.extend(join_inner(key, delta_a, delta_b))
-            result = Collection(result)
-            out.append((version, result))
-            index_a.compact(version, keys)
-            index_b.compact(version, keys)
+        # TODO: I believe this implementation actually takes time quadratic in the
+        # number of versions which produce nonempty output collections, but it
+        # is possible to take time linear in the number of versions.
+        for (version, collection) in index_a.join(index_b):
+            # Consolidating the output is arguably not necessary, but it makes
+            # the outputs easier to read.
+            out.append((version, collection.consolidate()))
         return CollectionTrace(out)
 
     def reduce(self, f):
-        # TODO not totally sure about this function vs consolidate_values
-        def add_values(first, second):
+        def subtract_values(first, second):
             result = defaultdict(int)
-            for (val, multiplicity) in first:
-                result[val] += multiplicity
-            for (val, multiplicity) in second:
-                result[val] += multiplicity
+            for (v1, m1) in first:
+                result[v1] += m1
+            for (v2, m2) in second:
+                result[v2] -= m2
 
             return [
                 (val, multiplicity)
@@ -213,9 +107,10 @@ class CollectionTrace:
         index = Index()
         index_out = Index()
         keys_todo = defaultdict(set)
+        output = []
 
-        for (version, collection) in self.trace:
-            for ((key, value), multiplicity) in collection.inner:
+        for (version, collection) in self._trace:
+            for ((key, value), multiplicity) in collection._inner:
                 index.add_value(key, version, (value, multiplicity))
                 keys_todo[version].add(key)
 
@@ -226,21 +121,18 @@ class CollectionTrace:
             keys = keys_todo[version]
             result = []
             for key in keys:
-                curr = index.reconstruct_before(key, version)
-                delta = index.values(key, version)
-                vals = add_values(curr, delta)
-                result = f(vals)
-                curr_output_negated = [
-                    (val, -multiplicity)
-                    for (val, multiplicity) in index_out.reconstruct_before(
-                        key, version
-                    )
-                ]
-                output_delta = add_values(result, curr_output_negated)
-                index_out.add_values(key, version, output_delta)
+                curr = index.reconstruct_at(key, version)
+                curr_out = index_out.reconstruct_at(key, version)
+                out = f(curr)
+                delta = subtract_values(out, curr_out)
+                for (value, multiplicity) in delta:
+                    result.append(((key, value), multiplicity))
+                    index_out.add_value(key, version, (value, multiplicity))
+            output.append((version, Collection(result)))
             index.compact(version, keys)
+            index_out.compact(version, keys)
 
-        return index_out.to_trace()
+        return CollectionTrace(output)
 
     def count(self):
         def count_inner(vals):
@@ -262,33 +154,61 @@ class CollectionTrace:
 
     def min(self):
         def min_inner(vals):
-            out = vals[0][0]
-            for (val, diff) in vals:
-                assert diff > 0
-                if val < out:
-                    out = val
-            return [(out, 1)]
+            consolidated = defaultdict(int)
+            for (val, multiplicity) in vals:
+                consolidated[val] += multiplicity
+            vals = [
+                (val, multiplicity)
+                for (val, multiplicity) in consolidated.items()
+                if multiplicity != 0
+            ]
+            if len(vals) != 0:
+                out = vals[0][0]
+                for (val, multiplicity) in vals:
+                    assert multiplicity > 0
+                    if val < out:
+                        out = val
+                return [(out, 1)]
+            else:
+                return []
 
         return self.reduce(min_inner)
 
     def max(self):
         def max_inner(vals):
-            out = vals[0][0]
-            for (val, diff) in vals:
-                assert diff > 0
-                if val > out:
-                    out = val
-            return [(out, 1)]
+            consolidated = defaultdict(int)
+            for (val, multiplicity) in vals:
+                consolidated[val] += multiplicity
+            vals = [
+                (val, multiplicity)
+                for (val, multiplicity) in consolidated.items()
+                if multiplicity != 0
+            ]
+            if len(vals) != 0:
+                out = vals[0][0]
+                for (val, multiplicity) in vals:
+                    assert multiplicity > 0
+                    if val > out:
+                        out = val
+                return [(out, 1)]
+            else:
+                return []
 
         return self.reduce(max_inner)
 
     def distinct(self):
         def distinct_inner(vals):
-            v = set()
-            for (val, diff) in vals:
-                assert diff > 0
-                v.add(val)
-            return [(val, 1) for val in v]
+            consolidated = defaultdict(int)
+            for (val, multiplicity) in vals:
+                consolidated[val] += multiplicity
+            vals = [
+                (val, multiplicity)
+                for (val, multiplicity) in consolidated.items()
+                if multiplicity != 0
+            ]
+            for (val, multiplicity) in vals:
+                assert multiplicity > 0
+            return [(val, 1) for (val, _) in vals]
 
         return self.reduce(distinct_inner)
 
@@ -297,11 +217,11 @@ class CollectionTrace:
         curr_out = Collection()
         ret = []
 
-        versions = [version in self.trace.keys()]
+        versions = [version in self._trace.keys()]
         versions.sort()
 
         for version in versions:
-            delta = self.trace[version]
+            delta = self._trace[version]
             curr = curr_in.concat(delta)
             result = curr.iterate(f)
             delta_out = result.concat(curr_out.negate()).consolidate()
