@@ -467,20 +467,21 @@ class DistinctOperator(ReduceOperator):
 
 class FeedbackOperator(UnaryOperator):
     def __init__(self, input_a, step, output, initial_frontier):
-        self.versions_with_data = set()
+        self.pending_versions_with_data = set()
+        self.versions_per_toplevel_version = defaultdict(set)
 
         def inner():
             for (typ, msg) in self.input_messages():
                 if typ == MessageType.DATA:
                     version, collection = msg
                     self.output.send_data(version.apply_step(step), collection)
-                    self.versions_with_data.add(version.apply_step(step))
+                    self.pending_versions_with_data.add(version.apply_step(step))
                 elif typ == MessageType.FRONTIER:
                     frontier = msg
                     assert self.input_frontier().less_equal(frontier)
                     self.set_input_frontier(frontier)
 
-            # TODO XXX not sure about this!
+            # TODO XXX revisit this logic.
 
             # The motivation here is: we want to stop sending frontier updates for
             # times that occur after fixedpoint has already been reached for some
@@ -503,32 +504,35 @@ class FeedbackOperator(UnaryOperator):
             # indicating that version N is still open upstream, and thus iteration on it has not
             # yet started, N - 1 is closed upstream, and is at the iteration_count1-th iteration
             # and N - 2 is closed upstream, and is at the iteration_count2-th iteration.
-            # Given this structure, we won't send any data through the feedback operatior unless
-            # there are 2 or more elements in the antichain (I think), in all cases, it is safe
-            # and desirable to retain the maximal antichain element with respect to the lexicographic
-            # total order.
 
             # Generate a potential output frontier by applying the increment to
             # the current input frontier.
-            candidate_output_frontier = self.input_frontier().apply_step(step)
+            incremented_input_frontier = self.input_frontier().apply_step(step)
             # Grab all of the elements from the potential output frontier.
-            elements = candidate_output_frontier._elements()
-            # This sort order has to respect the partial order, and it does, because
-            # Python's default sort for tuples uses the lexicographic total order.
-            elements.sort()
-            candidate = set()
-            # Make sure we don't accidentally set the output frontier to the empty
-            # antichain.
-            candidate.add(elements[-1])
+            elements = incremented_input_frontier._elements()
+            candidate_output_frontier = []
             for elem in elements:
-                # Retain the subset of antichain elements that cover some previously sent data.
-                to_remove = [x for x in self.versions_with_data if x.less_than(elem)]
-                if len(to_remove) > 0:
-                    candidate.add(elem)
-                    for x in to_remove:
-                        self.versions_with_data.remove(x)
-            # Construct a new antichain from the subset of elements we wish to keep.
-            candidate_output_frontier = Antichain([x for x in candidate])
+                truncated = elem.truncate()
+                self.versions_per_toplevel_version[truncated].add(elem)
+
+                # Keep a version if the top level version that it represents has not
+                # gone through the feedback loop at least two times.
+                if len(self.versions_per_toplevel_version[truncated]) <= 2:
+                    candidate_output_frontier.append(elem)
+                else:
+                    closed = {
+                        x for x in self.pending_versions_with_data if x.less_than(elem)
+                    }
+                    # Keep a version if it would enable further progress on previously sent data.
+                    if len(closed) > 0:
+                        candidate_output_frontier.append(elem)
+                        self.pending_versions_with_data -= closed
+                    # Discard a version if the top level version it represents has gone through
+                    # the feedback loop > 2 times and this version would not actually close
+                    # out any previously sent data, indicating that the iteration has reached fixedpoint.
+                    else:
+                        self.versions_per_toplevel_version.pop(truncated)
+            candidate_output_frontier = Antichain(candidate_output_frontier)
 
             assert self.output_frontier.less_equal(candidate_output_frontier)
             if self.output_frontier.less_than(candidate_output_frontier):
