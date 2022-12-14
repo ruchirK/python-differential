@@ -1,4 +1,16 @@
+"""The implementation of partially ordered versions (times) for use within a differential dataflow.
+"""
+
+
 class Version:
+    """A partially, or totally ordered version (time), consisting of a tuple of
+    integers.
+
+    All versions within a scope of a dataflow must have the same dimension/number
+    of coordinates. One dimensional versions are totally ordered. Multidimensional
+    versions are partially ordered by the product partial order.
+    """
+
     def __init__(self, version):
         if isinstance(version, int):
             assert version >= 0
@@ -86,6 +98,8 @@ class Version:
 # This keeps the min antichain.
 # I fully stole this from frank. TODO: Understand this better
 class Antichain:
+    """A minimal set of incomparable versions."""
+
     def __init__(self, elements):
         self.inner = []
         for element in elements:

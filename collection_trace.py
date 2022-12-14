@@ -39,6 +39,11 @@ class CollectionTrace:
             [(version, collection.filter(f)) for (version, collection) in self._trace]
         )
 
+    def negate(self):
+        return CollectionTrace(
+            [(version, collection.negate()) for (version, collection) in self._trace]
+        )
+
     def concat(self, other):
         """Concatenate two collection traces together."""
         out = []
@@ -46,13 +51,8 @@ class CollectionTrace:
         out.extend(other._trace)
         return CollectionTrace(out)
 
-    def negate(self):
-        return CollectionTrace(
-            [(version, collection.negate()) for (version, collection) in self._trace]
-        )
-
     def consolidate(self):
-        """Produce as output a collection trace where each collection in the trace
+        """Produce a collection trace where each collection in the trace
         is consolidated.
         """
         collections = defaultdict(Collection)
@@ -69,6 +69,10 @@ class CollectionTrace:
         )
 
     def join(self, other):
+        """Match pairs (k, v1) and (k, v2) from the two input collection
+        traces and produce a collection trace containing the corresponding
+        (k, (v1, v2)).
+        """
         index_a = Index()
         index_b = Index()
         out = []
@@ -91,6 +95,8 @@ class CollectionTrace:
         return CollectionTrace(out)
 
     def reduce(self, f):
+        """Apply a reduction function to all record values, grouped by key."""
+
         def subtract_values(first, second):
             result = defaultdict(int)
             for (v1, m1) in first:
@@ -135,6 +141,10 @@ class CollectionTrace:
         return CollectionTrace(output)
 
     def count(self):
+        """Count the number of times each key occurs in each collection in the collection
+        trace.
+        """
+
         def count_inner(vals):
             out = 0
             for (_, diff) in vals:
@@ -144,6 +154,10 @@ class CollectionTrace:
         return self.reduce(count_inner)
 
     def sum(self):
+        """Produce the sum of all the values paired with each key, for each
+        collection in the trace.
+        """
+
         def sum_inner(vals):
             out = 0
             for (val, diff) in vals:
@@ -153,6 +167,10 @@ class CollectionTrace:
         return self.reduce(sum_inner)
 
     def min(self):
+        """Produce the minimum value associated with each key, for each collection in
+        the trace.
+        """
+
         def min_inner(vals):
             consolidated = defaultdict(int)
             for (val, multiplicity) in vals:
@@ -175,6 +193,10 @@ class CollectionTrace:
         return self.reduce(min_inner)
 
     def max(self):
+        """Produce the minimum value associated with each key, for each collection in
+        the trace.
+        """
+
         def max_inner(vals):
             consolidated = defaultdict(int)
             for (val, multiplicity) in vals:
@@ -212,7 +234,8 @@ class CollectionTrace:
 
         return self.reduce(distinct_inner)
 
-    def interate(selfi, f):
+    def interate(self, f):
+        """Return the fixpoint of repeatedly applying f to each collection in the trace."""
         curr_in = Collection()
         curr_out = Collection()
         ret = []

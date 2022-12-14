@@ -15,18 +15,6 @@ class Collection:
     def __repr__(self):
         return f"Collection({self._inner})"
 
-    def concat(self, other):
-        """Concatenate two collections together."""
-        out = []
-        out.extend(self._inner)
-        out.extend(other._inner)
-        return Collection(out)
-
-    def negate(self):
-        return Collection(
-            [(data, -multiplicity) for (data, multiplicity) in self._inner]
-        )
-
     def map(self, f):
         """Apply a function to all records in the collection."""
         return Collection(
@@ -42,6 +30,18 @@ class Collection:
                 if f(data) == True
             ]
         )
+
+    def negate(self):
+        return Collection(
+            [(data, -multiplicity) for (data, multiplicity) in self._inner]
+        )
+
+    def concat(self, other):
+        """Concatenate two collections together."""
+        out = []
+        out.extend(self._inner)
+        out.extend(other._inner)
+        return Collection(out)
 
     def consolidate(self):
         """Produce as output a collection that is logically equivalent to the input

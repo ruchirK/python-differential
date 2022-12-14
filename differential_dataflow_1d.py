@@ -1,3 +1,7 @@
+"""An implementation of differential dataflow specialized for the setting where versions (times) are
+integers. This implementation supports all differential operations except iterate.
+"""
+
 from collections import defaultdict
 
 from collection import Collection

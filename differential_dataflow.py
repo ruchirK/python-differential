@@ -1,3 +1,11 @@
+"""An implementation of differential dataflow.
+
+Compared to the Rust implementation, this implementation is both much less performant
+and more restrictive. Specifically, multiplicities in collections are constrained to
+be integers, and versions (timestamps in the Rust codebase) are constrained to be
+Version objects (integer tuples ordered by the product partial order).
+"""
+
 from collections import defaultdict
 
 from collection import Collection
@@ -14,6 +22,14 @@ from order import Version, Antichain
 
 
 class CollectionStreamBuilder:
+    """A representation of a dataflow edge as the dataflow graph is being built.
+
+    This object is only used to set up the dataflow graph, and does not actually
+    interact with any data. Manually creating an instance of this object is highly
+    unexpected - instead more normal usage would be to create an instance using
+    the new_input method on GraphBuilder.
+    """
+
     def __init__(self, graph):
         self._writer = CollectionStreamWriter()
         self.graph = graph
@@ -153,6 +169,8 @@ class CollectionStreamBuilder:
 
 
 class GraphBuilder:
+    """A representation of a dataflow graph as it is being built."""
+
     def __init__(self, initial_frontier):
         self.streams = []
         self.operators = []
@@ -462,22 +480,55 @@ class FeedbackOperator(UnaryOperator):
                     assert self.input_frontier().less_equal(frontier)
                     self.set_input_frontier(frontier)
 
-            candidate_output_frontier = self.input_frontier().apply_step(step)
             # TODO XXX not sure about this!
-            # print(f'versions with data: {self.versions_with_data}')
+
+            # The motivation here is: we want to stop sending frontier updates for
+            # times that occur after fixedpoint has already been reached for some
+            # input version. Otherwise, we would keep incrementing and circulating
+            # useless frontier updates forever.
+
+            # We want to only send frontier updates for those times that
+            # actually "cover" some data (aka the subset of antichain elements
+            # for which there exists some collection that was sent at a version
+            # less than or equal to that antichain element.)
+            # However, we also can't send the empty antichain if no antichain elements
+            # currently cover some previously sent data, so we always have to retain some
+            # antichain element.
+
+            # I believe this works in cases where the subgraph being iterated on contains
+            # some consolidation because the iteration can then only advance when one of
+            # the upper scope timestamps has been closed. So the antichains sent to
+            # the feedback operator always look like (in the two dimensional case):
+            # [(N, 1), (N - 1, iteration_count1), (N - 2, iteration_count2), ...]
+            # indicating that version N is still open upstream, and thus iteration on it has not
+            # yet started, N - 1 is closed upstream, and is at the iteration_count1-th iteration
+            # and N - 2 is closed upstream, and is at the iteration_count2-th iteration.
+            # Given this structure, we won't send any data through the feedback operatior unless
+            # there are 2 or more elements in the antichain (I think), in all cases, it is safe
+            # and desirable to retain the maximal antichain element with respect to the lexicographic
+            # total order.
+
+            # Generate a potential output frontier by applying the increment to
+            # the current input frontier.
+            candidate_output_frontier = self.input_frontier().apply_step(step)
+            # Grab all of the elements from the potential output frontier.
             elements = candidate_output_frontier._elements()
+            # This sort order has to respect the partial order, and it does, because
+            # Python's default sort for tuples uses the lexicographic total order.
             elements.sort()
             candidate = set()
+            # Make sure we don't accidentally set the output frontier to the empty
+            # antichain.
             candidate.add(elements[-1])
             for elem in elements:
+                # Retain the subset of antichain elements that cover some previously sent data.
                 to_remove = [x for x in self.versions_with_data if x.less_than(elem)]
-                # print(f'elem: {elem} to_remove: {to_remove}')
                 if len(to_remove) > 0:
                     candidate.add(elem)
                     for x in to_remove:
                         self.versions_with_data.remove(x)
+            # Construct a new antichain from the subset of elements we wish to keep.
             candidate_output_frontier = Antichain([x for x in candidate])
-            # print(f'candidate_output_frontier: {candidate_output_frontier} output_frontiier: {self.output_frontier}')
 
             assert self.output_frontier.less_equal(candidate_output_frontier)
             if self.output_frontier.less_than(candidate_output_frontier):

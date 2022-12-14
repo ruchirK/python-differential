@@ -1,3 +1,10 @@
+"""The implementation of index structures roughly analogous to differential arrangements for manipulating and
+accessing (key, value) structured data across multiple versions (times).
+
+There are two implementations of this data structure in this file - one specialized for integer versions
+and the other one for partially ordered times. Using both at the same time is highly unexpected.
+"""
+
 from collections import defaultdict
 from collection import Collection
 from order import Version, Antichain
@@ -107,6 +114,16 @@ class Index1D:
 
 
 class Index:
+    """A map from a difference collection trace's keys -> versions at which
+    the key has nonzero multiplicity -> (value, multiplicities) that changed.
+
+    Used in operations like join and reduce where the operation needs to
+    exploit the key-value structure of the data to run efficiently.
+
+    This implementation is designed for the fully general case of partially ordered
+    versions.
+    """
+
     def __init__(self):
         self.inner = defaultdict(lambda: defaultdict(list))
         # TODO: take an initial time?
@@ -128,9 +145,6 @@ class Index:
                 out.extend(values)
         return out
 
-    def values(self, key, version):
-        return self.inner[key][version]
-
     def versions(self, key):
         return [version for version in self.inner[key].keys()]
 
@@ -142,20 +156,6 @@ class Index:
         for (key, versions) in other.inner.items():
             for (version, data) in versions.items():
                 self.inner[key][version].extend(data)
-
-    def to_trace(self):
-        collections = defaultdict(list)
-        for (key, versions) in self.inner.items():
-            for (version, data) in versions.items():
-                collections[version].extend(
-                    [((key, val), multiplicity) for (val, multiplicity) in data]
-                )
-        return CollectionTrace(
-            [
-                (version, Collection(collection))
-                for (version, collection) in collections.items()
-            ]
-        )
 
     def join(self, other):
         collections = defaultdict(list)
