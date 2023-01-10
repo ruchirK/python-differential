@@ -15,20 +15,22 @@ and efficiently, regardless of the computation they defined.
 Small terminology note: I started using version instead of time/timestamp, and multiplicity instead of diff, throughout
 the code, so I will use those names here as well.
 
-The code is structured to facillitate learning by having multiple files that incrementally build up the complexity:
-  - `collection.py`: defines a collection (multiset) of data and implements the various operations (join/reduce/map/etc) over
-  a single collection.
-  - `collection_trace.py`: defines a bounded, totally ordered, sequence of collections and implements the various operations
-  over bounded, totally ordered sequences of collections. Compared to `collection.py` the main difference here is that
+The code includes several preliminary implementations that build on concepts introduced in each other, to make things easier to understand. These preliminary implementations are in the directories `v0` - `v4`. Each directory is entirely self contained, however a lot of the components in a given implementation are duplicated from prior ones. There are 5 preliminary implementations and one final one:
+  - `v0`: defines a collection (multiset) of data and implements the various operations (join/reduce/map/etc) over
+  a single collection. This is roughly the starting point for "what are we even trying to do?".
+  - `v1`: defines a finite, totally ordered, sequence of difference collections, to describe a location that changes. `v1` also
+  implements the various operations over such difference collection sequences efficiently. Compared to `v0` the main change in `v1` is
   we need to use indexes to efficiently compute reductions and joins when only a small subset of keys change from one collection
   version to the next.
-  - `differential_dataflow_1d.py`: implements differential dataflow restricted to the case of one dimensional timestamps.
-  Compared to `collection_trace.py` the main difference here is that now we have to reason about unbounded sequences of
-  collections, and so we need to have operators (to hold state across different executions) and frontier updates (to indicate
-  that a particular version/timestamp is closed).
-  - `differential_dataflow.py`: implements differential dataflow in the general case when versions/timestamps are partially ordered.
-  Compared to `differential_dataflow_1d.py` the main difference here is that we need to use partial orders, antichains, and lattices
-  and we are able to implement `iterate`.
+  - `v2`: extends the approach in `v1` to support an unbounded number of difference collections. Now, we have to explicitly construct a dataflow
+  graph, rather than relying on the implicit graph induced by function calls. All of the data travels through dataflow edges (basically queues),
+  to operators/nodes (basically a struct that do some `work_function` to effect a computation + hold onto state across invocations of its
+  `work_fn`). Each operator still has to output data in order, and binary operators always need to wait for both inputs to become available before they can produce an output. Roughly, this is an approach to implememting something like differential while rejecting a lot of the timely paper.
+  - `v3`: extends `v2` to explicitly attach a version (time) label to all messages. Operators also now receive a message when a given version/range of versions will no longer receive any more data. Versions are constrained to be integers.
+  - `v4`: extends `v3` to allow versions to be tuples of integers that are totally ordered with the lexicographic order. This implementation is the first that supports `iterate` with changing data, but the user has to specify a cap on the number of iterations.
+  TODO: I'm not sure that the cap on the number of iterations is strictly necessary
+  - `final`/the toplevel of this directory: extends `v4` to support versions that are partially ordered with the product partial order. The
+  versions still have to be tuples of integers.
 
 This implementation is different from other implementations (to the best of my knowledge) in that it doesn't
 rely on a scheduler reasoning about the structure of the computation graph and scheduling operators intelligently
