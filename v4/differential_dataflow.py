@@ -1,5 +1,5 @@
 """An implementation of differential dataflow specialized for the setting where versions (times) are
-integers. This implementation supports all differential operations except iterate.
+integer tuples totally ordered lexicographically. This implementation supports all differential operations.
 """
 
 from collections import defaultdict
@@ -13,7 +13,10 @@ from graph import (
     MessageType,
     UnaryOperator,
 )
-from index import Index1D as Index
+from index import Index
+from version import Version
+
+ITERATION_LIMIT = 100
 
 
 class CollectionStreamBuilder:
@@ -97,6 +100,70 @@ class CollectionStreamBuilder:
         self.graph.add_operator(operator)
         self.graph.add_stream(output.connect_reader())
         return output
+
+    def consolidate(self):
+        output = CollectionStreamBuilder(self.graph)
+        operator = ConsolidateOperator(
+            self.connect_reader(), output.writer(), self.graph.frontier()
+        )
+        self.graph.add_operator(operator)
+        self.graph.add_stream(output.connect_reader())
+        return output
+
+    def distinct(self):
+        output = CollectionStreamBuilder(self.graph)
+        operator = DistinctOperator(
+            self.connect_reader(), output.writer(), self.graph.frontier()
+        )
+        self.graph.add_operator(operator)
+        self.graph.add_stream(output.connect_reader())
+        return output
+
+    def _start_scope(self):
+        new_frontier = self.graph.frontier().extend()
+        self.graph.push_frontier(new_frontier)
+
+    def _end_scope(self):
+        self.graph.pop_frontier()
+
+    def _ingress(self):
+        output = CollectionStreamBuilder(self.graph)
+        operator = IngressOperator(
+            self.connect_reader(),
+            output.writer(),
+            ITERATION_LIMIT,
+            self.graph.frontier(),
+        )
+        self.graph.add_operator(operator)
+        self.graph.add_stream(output.connect_reader())
+        return output
+
+    def _egress(self):
+        output = CollectionStreamBuilder(self.graph)
+        operator = EgressOperator(
+            self.connect_reader(), output.writer(), self.graph.frontier()
+        )
+        self.graph.add_operator(operator)
+        self.graph.add_stream(output.connect_reader())
+        return output
+
+    def iterate(self, f):
+        self._start_scope()
+        feedback_stream = CollectionStreamBuilder(self.graph)
+        feedback_stream.debug("feedback")
+        entered = self._ingress().concat(feedback_stream)
+        result = f(entered)
+        feedback_operator = FeedbackOperator(
+            result.connect_reader(),
+            1,
+            ITERATION_LIMIT,
+            feedback_stream.writer(),
+            self.graph.frontier(),
+        )
+        self.graph.add_stream(feedback_stream)
+        self.graph.add_operator(feedback_operator)
+        self._end_scope()
+        return result._egress()
 
 
 class GraphBuilder:
@@ -187,7 +254,7 @@ class ConcatOperator(BinaryOperator):
                     self.output.send_data(version, collection)
                 elif typ == MessageType.FRONTIER:
                     frontier = msg
-                    self.set_input_b_frontier(version)
+                    self.set_input_b_frontier(frontier)
 
             min_input_frontier = min(self.input_a_frontier(), self.input_b_frontier())
             if min_input_frontier > self.output_frontier:
@@ -211,11 +278,40 @@ class DebugOperator(UnaryOperator):
                     frontier = msg
                     assert self.input_frontier() <= frontier
                     self.set_input_frontier(frontier)
-                    print(f"debug {name} notification: frontier {version}")
+                    print(f"debug {name} notification: frontier {frontier}")
                     assert self.output_frontier <= self.input_frontier()
                     if self.output_frontier < self.input_frontier():
                         self.output_frontier = self.input_frontier()
                         self.output.send_frontier(self.output_frontier)
+
+        super().__init__(input_a, output, inner, initial_frontier)
+
+
+class ConsolidateOperator(UnaryOperator):
+    def __init__(self, input_a, output, initial_frontier):
+        self.collections = defaultdict(Collection)
+
+        def inner():
+            for (typ, msg) in self.input_messages():
+                if typ == MessageType.DATA:
+                    version, collection = msg
+                    self.collections[version]._extend(collection)
+                elif typ == MessageType.FRONTIER:
+                    frontier = msg
+                    assert self.input_frontier() <= frontier
+                    self.set_input_frontier(frontier)
+            finished_versions = [
+                version
+                for version in self.collections.keys()
+                if version < self.input_frontier()
+            ]
+            for version in finished_versions:
+                collection = self.collections.pop(version).consolidate()
+                self.output.send_data(version, collection)
+            assert self.output_frontier <= self.input_frontier()
+            if self.output_frontier < self.input_frontier():
+                self.output_frontier = self.input_frontier()
+                self.output.send_frontier(self.output_frontier)
 
         super().__init__(input_a, output, inner, initial_frontier)
 
@@ -339,18 +435,108 @@ class CountOperator(ReduceOperator):
         super().__init__(input_a, output, count_inner, initial_frontier)
 
 
+class DistinctOperator(ReduceOperator):
+    def __init__(self, input_a, output, initial_frontier):
+        def distinct_inner(vals):
+            consolidated = defaultdict(int)
+            for (val, diff) in vals:
+                consolidated[val] += diff
+            for (val, diff) in consolidated.items():
+                assert diff >= 0
+            return [(val, 1) for (val, diff) in consolidated.items() if diff > 0]
+
+        super().__init__(input_a, output, distinct_inner, initial_frontier)
+
+
+class FeedbackOperator(UnaryOperator):
+    def __init__(self, input_a, step, iteration_limit, output, initial_frontier):
+        def inner():
+            for (typ, msg) in self.input_messages():
+                if typ == MessageType.DATA:
+                    version, collection = msg
+                    # TODO double check
+                    if version.inner[-1] < iteration_limit:
+                        self.output.send_data(
+                            version.apply_step(step, iteration_limit), collection
+                        )
+                elif typ == MessageType.FRONTIER:
+                    frontier = msg
+                    assert self.input_frontier() <= frontier
+                    self.set_input_frontier(frontier)
+
+            candidate_output_frontier = self.input_frontier().apply_step(
+                step, iteration_limit
+            )
+            assert self.output_frontier <= candidate_output_frontier
+            if self.output_frontier < candidate_output_frontier:
+                self.output_frontier = candidate_output_frontier
+                self.output.send_frontier(self.output_frontier)
+
+        super().__init__(input_a, output, inner, initial_frontier)
+
+    def connect_loop(output):
+        self.output = output
+
+
+class IngressOperator(UnaryOperator):
+    def __init__(self, input_a, output, iteration_limit, initial_frontier):
+        def inner():
+            for (typ, msg) in self.input_messages():
+                if typ == MessageType.DATA:
+                    version, collection = msg
+                    new_version = version.extend()
+                    self.output.send_data(new_version, collection)
+                    self.output.send_data(
+                        new_version.apply_step(1, iteration_limit), collection.negate()
+                    )
+                elif typ == MessageType.FRONTIER:
+                    frontier = msg
+                    new_frontier = frontier.extend()
+                    assert self.input_frontier() <= new_frontier
+                    self.set_input_frontier(new_frontier)
+
+            assert self.output_frontier <= self.input_frontier()
+            if self.output_frontier < self.input_frontier():
+                self.output_frontier = self.input_frontier()
+                self.output.send_frontier(self.output_frontier)
+
+        super().__init__(input_a, output, inner, initial_frontier)
+
+
+class EgressOperator(UnaryOperator):
+    def __init__(self, input_a, output, initial_frontier):
+        def inner():
+            for (typ, msg) in self.input_messages():
+                if typ == MessageType.DATA:
+                    version, collection = msg
+                    new_version = version.truncate()
+                    self.output.send_data(new_version, collection)
+                elif typ == MessageType.FRONTIER:
+                    frontier = msg
+                    new_frontier = frontier.truncate()
+                    assert self.input_frontier() <= new_frontier
+                    self.set_input_frontier(new_frontier)
+
+            assert self.output_frontier <= self.input_frontier()
+            if self.output_frontier < self.input_frontier():
+                self.output_frontier = self.input_frontier()
+                self.output.send_frontier(self.output_frontier)
+
+        super().__init__(input_a, output, inner, initial_frontier)
+
+
 if __name__ == "__main__":
-    graph_builder = GraphBuilder(0)
+    graph_builder = GraphBuilder(Version(0))
     input_a, input_a_writer = graph_builder.new_input()
     output = input_a.map(lambda data: data + 5).filter(lambda data: data % 2 == 0)
     input_a.negate().concat(output).debug("output")
     graph = graph_builder.finalize()
 
     for i in range(0, 10):
-        input_a_writer.send_data(i, Collection([(i, 1)]))
-        input_a_writer.send_frontier(i)
+        input_a_writer.send_data(Version(i), Collection([(i, 1)]))
+        input_a_writer.send_frontier(Version(i))
         graph.step()
-    graph_builder = GraphBuilder(0)
+    graph_builder = GraphBuilder(Version(0))
     input_a, input_a_writer = graph_builder.new_input()
     input_b, input_b_writer = graph_builder.new_input()
 
@@ -358,13 +544,40 @@ if __name__ == "__main__":
     graph = graph_builder.finalize()
 
     for i in range(0, 10):
-        input_a_writer.send_data(i, Collection([((1, i), 2)]))
-        input_a_writer.send_data(i, Collection([((2, i), 2)]))
-        input_b_writer.send_data(i, Collection([((1, i + 2), 2)]))
-        input_b_writer.send_data(i, Collection([((2, i + 3), 2)]))
-        input_a_writer.send_frontier(i)
-        input_b_writer.send_frontier(i)
+        input_a_writer.send_data(Version(i), Collection([((1, i), 2)]))
+        input_a_writer.send_data(Version(i), Collection([((2, i), 2)]))
+        input_b_writer.send_data(Version(i), Collection([((1, i + 2), 2)]))
+        input_b_writer.send_data(Version(i), Collection([((2, i + 3), 2)]))
+        input_a_writer.send_frontier(Version(i))
+        input_b_writer.send_frontier(Version(i))
         graph.step()
-    input_a_writer.send_frontier(11)
-    input_b_writer.send_frontier(11)
+    input_a_writer.send_frontier(Version(11))
+    input_b_writer.send_frontier(Version(11))
     graph.step()
+
+    graph_builder = GraphBuilder(Version(0))
+    input_a, input_a_writer = graph_builder.new_input()
+
+    def geometric_series(collection):
+        return (
+            collection.map(lambda data: data + data)
+            .concat(collection)
+            .filter(lambda data: data <= 100)
+            .map(lambda data: (data, ()))
+            .distinct()
+            .map(lambda data: data[0])
+            .consolidate()
+        )
+
+    output = input_a.iterate(geometric_series).debug("iterate")
+    graph = graph_builder.finalize()
+
+    input_a_writer.send_data(Version(0), Collection([(1, 1)]))
+    input_a_writer.send_frontier(Version(1))
+
+    for i in range(0, 1020):
+        graph.step()
+    input_a_writer.send_data(Version(1), Collection([(2, 1), (1, -1)]))
+    input_a_writer.send_frontier(Version(2))
+    for i in range(0, 1020):
+        graph.step()

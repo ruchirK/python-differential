@@ -646,5 +646,5 @@ if __name__ == "__main__":
     input_a_writer.send_data(Version(0), Collection([(1, 1)]))
     input_a_writer.send_frontier(Antichain([Version(1)]))
 
-    for i in range(0, 10):
+    for i in range(0, 1000):
         graph.step()

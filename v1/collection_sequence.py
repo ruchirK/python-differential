@@ -4,10 +4,11 @@
 
 from collections import defaultdict
 from collection import Collection
-from index import Index1D as Index
+from index import Index
+from itertools import zip_longest
 
 
-class CollectionTrace:
+class CollectionSequence:
     """A bounded sequence of collections of data.
 
     This class represents a difference collection trace, which is to say, the
@@ -23,50 +24,35 @@ class CollectionTrace:
         self._trace = trace
 
     def __repr__(self):
-        return f"CollectionTrace({self._trace})"
+        return f"CollectionSequence({self._trace})"
 
     def map(self, f):
         """Apply a function to all records in the collection trace."""
-        return CollectionTrace(
-            [(version, collection.map(f)) for (version, collection) in self._trace]
-        )
+        return CollectionSequence([collection.map(f) for collection in self._trace])
 
     def filter(self, f):
         """Filter out records where f(record) evaluates to False from all
         collections in the collection trace.
         """
-        return CollectionTrace(
-            [(version, collection.filter(f)) for (version, collection) in self._trace]
-        )
+        return CollectionSequence([collection.filter(f) for collection in self._trace])
 
     def negate(self):
-        return CollectionTrace(
-            [(version, collection.negate()) for (version, collection) in self._trace]
-        )
+        return CollectionSequence([collection.negate() for collection in self._trace])
 
     def concat(self, other):
         """Concatenate two collection traces together."""
-        out = []
-        out.extend(self._trace)
-        out.extend(other._trace)
-        return CollectionTrace(out)
+        inputs = zip_longest(self._trace, other._trace, fillvalue=Collection())
+        return CollectionSequence([a.concat(b) for (a, b) in inputs])
 
     def consolidate(self):
         """Produce a collection trace where each collection in the trace
         is consolidated.
         """
-        collections = defaultdict(Collection)
+        out = []
+        for collection in self._trace:
+            out.append(collection.consolidate())
 
-        for (version, collection) in self._trace:
-            collections[version]._extend(collection)
-
-        consolidated = {}
-        for (version, collection) in collections.items():
-            consolidated[version] = collection.consolidate()
-
-        return CollectionTrace(
-            [(version, collection) for (version, collection) in consolidated.items()]
-        )
+        return CollectionSequence(out)
 
     def join(self, other):
         """Match pairs (k, v1) and (k, v2) from the two input collection
@@ -77,22 +63,25 @@ class CollectionTrace:
         index_b = Index()
         out = []
 
-        for (version, collection) in self._trace:
-            for ((key, value), multiplicity) in collection._inner:
-                index_a.add_value(key, version, (value, multiplicity))
+        for (collection_a, collection_b) in zip_longest(
+            self._trace, other._trace, fillvalue=Collection()
+        ):
+            delta_a = Index()
+            delta_b = Index()
+            result = Collection()
 
-        for (version, collection) in other._trace:
-            for ((key, value), multiplicity) in collection._inner:
-                index_b.add_value(key, version, (value, multiplicity))
+            for ((key, value), multiplicity) in collection_a._inner:
+                delta_a.add_value(key, (value, multiplicity))
+            for ((key, value), multiplicity) in collection_b._inner:
+                delta_b.add_value(key, (value, multiplicity))
 
-        # TODO: I believe this implementation actually takes time quadratic in the
-        # number of versions which produce nonempty output collections, but it
-        # is possible to take time linear in the number of versions.
-        for (version, collection) in index_a.join(index_b):
-            # Consolidating the output is arguably not necessary, but it makes
-            # the outputs easier to read.
-            out.append((version, collection.consolidate()))
-        return CollectionTrace(out)
+            result._extend(delta_a.join(index_b))
+            index_a.append(delta_a)
+            result._extend(index_a.join(delta_b))
+            index_b.append(delta_b)
+            # Consolidating the output is not strictly necessary and is only done here to make the output easier to inspect visually.
+            out.append(result.consolidate())
+        return CollectionSequence(out)
 
     def reduce(self, f):
         """Apply a reduction function to all record values, grouped by key."""
@@ -115,30 +104,27 @@ class CollectionTrace:
         keys_todo = defaultdict(set)
         output = []
 
-        for (version, collection) in self._trace:
-            for ((key, value), multiplicity) in collection._inner:
-                index.add_value(key, version, (value, multiplicity))
-                keys_todo[version].add(key)
-
-        versions = [version for version in keys_todo.keys()]
-        versions.sort()
-
-        for version in versions:
-            keys = keys_todo[version]
+        for collection in self._trace:
+            keys_todo = set()
             result = []
+            for ((key, value), multiplicity) in collection._inner:
+                index.add_value(key, (value, multiplicity))
+                keys_todo.add(key)
+
+            keys = [key for key in keys_todo]
             for key in keys:
-                curr = index.reconstruct_at(key, version)
-                curr_out = index_out.reconstruct_at(key, version)
+                curr = index.get(key)
+                curr_out = index_out.get(key)
                 out = f(curr)
                 delta = subtract_values(out, curr_out)
                 for (value, multiplicity) in delta:
                     result.append(((key, value), multiplicity))
-                    index_out.add_value(key, version, (value, multiplicity))
-            output.append((version, Collection(result)))
-            index.compact(version, keys)
-            index_out.compact(version, keys)
+                    index_out.add_value(key, (value, multiplicity))
+            output.append(Collection(result))
+            index.compact(keys)
+            index_out.compact(keys)
 
-        return CollectionTrace(output)
+        return CollectionSequence(output)
 
     def count(self):
         """Count the number of times each key occurs in each collection in the collection
@@ -234,25 +220,9 @@ class CollectionTrace:
 
         return self.reduce(distinct_inner)
 
-    def interate(self, f):
+    def iterate(self, f):
         """Return the fixpoint of repeatedly applying f to each collection in the trace."""
-        curr_in = Collection()
-        curr_out = Collection()
-        ret = []
-
-        versions = [version in self._trace.keys()]
-        versions.sort()
-
-        for version in versions:
-            delta = self._trace[version]
-            curr = curr_in.concat(delta)
-            result = curr.iterate(f)
-            delta_out = result.concat(curr_out.negate()).consolidate()
-            ret.append((version, delta_out))
-            curr_in = curr_in.concat(delta)
-            curr_out = curr_out.concat(delta_out)
-
-        return CollectionTrace(ret)
+        # TODO
 
 
 if __name__ == "__main__":
@@ -264,21 +234,21 @@ if __name__ == "__main__":
     )
     e = Collection([(1, 1)])
 
-    trace_a = CollectionTrace(
+    trace_a = CollectionSequence(
         [
-            (0, a),
-            (1, Collection([(("apple", "$5"), -1), (("apple", "$7"), 1)])),
-            (2, Collection([(("lemon", "$1"), 1)])),
+            a,
+            Collection([(("apple", "$5"), -1), (("apple", "$7"), 1)]),
+            Collection([(("lemon", "$1"), 1)]),
         ]
     )
     print(trace_a.map(lambda data: (data[1], data[0])))
     print(trace_a.filter(lambda data: data[0] != "apple"))
 
-    trace_b = CollectionTrace(
+    trace_b = CollectionSequence(
         [
-            (0, b),
-            (1, Collection([])),
-            (2, Collection([(("lemon", "$22"), 3), (("kiwi", "$1"), 2)])),
+            b,
+            Collection([]),
+            Collection([(("lemon", "$22"), 3), (("kiwi", "$1"), 2)]),
         ]
     )
     print(trace_a.join(trace_b))
