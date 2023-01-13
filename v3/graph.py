@@ -29,11 +29,11 @@ class DifferenceStreamReader:
     def is_empty(self):
         return len(self._queue) == 0
 
-    def probe_frontier_less_equal(self, frontier):
+    def probe_frontier_less_than(self, frontier):
         for (typ, msg) in self._queue:
             if typ == MessageType.FRONTIER:
                 received_frontier = msg
-                if received_frontier > frontier:
+                if received_frontier >= frontier:
                     return False
         return True
 

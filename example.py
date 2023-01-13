@@ -48,7 +48,7 @@ def game_of_life(collection):
 
 graph_builder = GraphBuilder(Antichain([Version(0)]))
 input_a, input_a_writer = graph_builder.new_input()
-output = input_a.iterate(game_of_life).debug("iterate")
+output = input_a.iterate(game_of_life).debug("iterate").connect_reader()
 graph = graph_builder.finalize()
 
 input_a_writer.send_data(
@@ -56,5 +56,5 @@ input_a_writer.send_data(
 )
 input_a_writer.send_frontier(Antichain([Version(1)]))
 
-for i in range(0, 100):
+while output.probe_frontier_less_than(Antichain([Version(1)])):
     graph.step()

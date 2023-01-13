@@ -645,19 +645,23 @@ if __name__ == "__main__":
             .consolidate()
         )
 
-    output = input_a.iterate(geometric_series).debug("iterate")
+    output = input_a.iterate(geometric_series).debug("iterate").connect_reader()
     graph = graph_builder.finalize()
 
     input_a_writer.send_data(Version(0), Collection([(1, 1)]))
     input_a_writer.send_frontier(Antichain([Version(1)]))
 
-    for i in range(0, 1000):
+    while output.probe_frontier_less_than(Antichain([Version(1)])):
         graph.step()
+
     input_a_writer.send_data(Version(1), Collection([(16, 1), (3, 1)]))
     input_a_writer.send_frontier(Antichain([Version(2)]))
-    for i in range(0, 1020):
+
+    while output.probe_frontier_less_than(Antichain([Version(2)])):
         graph.step()
+
     input_a_writer.send_data(Version(2), Collection([(3, -1)]))
     input_a_writer.send_frontier(Antichain([Version(3)]))
-    for i in range(0, 1020):
+
+    while output.probe_frontier_less_than(Antichain([Version(3)])):
         graph.step()
