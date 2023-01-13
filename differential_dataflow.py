@@ -11,8 +11,8 @@ from collections import defaultdict
 from collection import Collection
 from graph import (
     BinaryOperator,
-    CollectionStreamReader,
-    CollectionStreamWriter,
+    DifferenceStreamReader,
+    DifferenceStreamWriter,
     Graph,
     MessageType,
     UnaryOperator,
@@ -21,7 +21,7 @@ from index import Index
 from order import Version, Antichain
 
 
-class CollectionStreamBuilder:
+class DifferenceStreamBuilder:
     """A representation of a dataflow edge as the dataflow graph is being built.
 
     This object is only used to set up the dataflow graph, and does not actually
@@ -31,7 +31,7 @@ class CollectionStreamBuilder:
     """
 
     def __init__(self, graph):
-        self._writer = CollectionStreamWriter()
+        self._writer = DifferenceStreamWriter()
         self.graph = graph
 
     def connect_reader(self):
@@ -41,7 +41,7 @@ class CollectionStreamBuilder:
         return self._writer
 
     def map(self, f):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = MapOperator(
             self.connect_reader(), output.writer(), f, self.graph.frontier()
         )
@@ -50,7 +50,7 @@ class CollectionStreamBuilder:
         return output
 
     def filter(self, f):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = FilterOperator(
             self.connect_reader(), output.writer(), f, self.graph.frontier()
         )
@@ -59,7 +59,7 @@ class CollectionStreamBuilder:
         return output
 
     def negate(self):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = NegateOperator(
             self.connect_reader(), output.writer(), self.graph.frontier()
         )
@@ -69,7 +69,7 @@ class CollectionStreamBuilder:
 
     def concat(self, other):
         assert id(self.graph) == id(other.graph)
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = ConcatOperator(
             self.connect_reader(),
             other.connect_reader(),
@@ -81,7 +81,7 @@ class CollectionStreamBuilder:
         return output
 
     def debug(self, name=""):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = DebugOperator(
             self.connect_reader(), output.writer(), name, self.graph.frontier()
         )
@@ -91,7 +91,7 @@ class CollectionStreamBuilder:
 
     def join(self, other):
         assert id(self.graph) == id(other.graph)
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = JoinOperator(
             self.connect_reader(),
             other.connect_reader(),
@@ -103,7 +103,7 @@ class CollectionStreamBuilder:
         return output
 
     def count(self):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = CountOperator(
             self.connect_reader(), output.writer(), self.graph.frontier()
         )
@@ -112,7 +112,7 @@ class CollectionStreamBuilder:
         return output
 
     def consolidate(self):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = ConsolidateOperator(
             self.connect_reader(), output.writer(), self.graph.frontier()
         )
@@ -121,7 +121,7 @@ class CollectionStreamBuilder:
         return output
 
     def distinct(self):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = DistinctOperator(
             self.connect_reader(), output.writer(), self.graph.frontier()
         )
@@ -137,7 +137,7 @@ class CollectionStreamBuilder:
         self.graph.pop_frontier()
 
     def _ingress(self):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = IngressOperator(
             self.connect_reader(), output.writer(), self.graph.frontier()
         )
@@ -146,7 +146,7 @@ class CollectionStreamBuilder:
         return output
 
     def _egress(self):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = EgressOperator(
             self.connect_reader(), output.writer(), self.graph.frontier()
         )
@@ -156,7 +156,7 @@ class CollectionStreamBuilder:
 
     def iterate(self, f):
         self._start_scope()
-        feedback_stream = CollectionStreamBuilder(self.graph)
+        feedback_stream = DifferenceStreamBuilder(self.graph)
         entered = self._ingress().concat(feedback_stream)
         result = f(entered)
         feedback_operator = FeedbackOperator(
@@ -177,7 +177,7 @@ class GraphBuilder:
         self.frontier_stack = [initial_frontier]
 
     def new_input(self):
-        stream_builder = CollectionStreamBuilder(self)
+        stream_builder = DifferenceStreamBuilder(self)
         self.streams.append(stream_builder.connect_reader())
         return stream_builder, stream_builder.writer()
 
@@ -403,7 +403,6 @@ class ReduceOperator(UnaryOperator):
                         self.index.add_value(key, version, (value, multiplicity))
                         self.keys_todo[version].add(key)
                         for v2 in self.index.versions(key):
-                            new_version = version.join(v2)
                             self.keys_todo[version.join(v2)].add(key)
                 elif typ == MessageType.FRONTIER:
                     frontier = msg
@@ -467,71 +466,77 @@ class DistinctOperator(ReduceOperator):
 
 class FeedbackOperator(UnaryOperator):
     def __init__(self, input_a, step, output, initial_frontier):
-        self.pending_versions_with_data = set()
-        self.versions_per_toplevel_version = defaultdict(set)
+        # Map from top-level version -> set of messages where we have
+        # sent some data at that version
+        self.in_flight_data = defaultdict(set)
+        # Versions where a given top-level version has updated
+        # its iteration without sending any data.
+        self.empty_versions = defaultdict(set)
 
         def inner():
             for (typ, msg) in self.input_messages():
                 if typ == MessageType.DATA:
                     version, collection = msg
-                    self.output.send_data(version.apply_step(step), collection)
-                    self.pending_versions_with_data.add(version.apply_step(step))
+                    new_version = version.apply_step(step)
+                    truncated = new_version.truncate()
+                    self.output.send_data(new_version, collection)
+
+                    # Record that we sent data at this version.
+                    self.in_flight_data[truncated].add(new_version)
+                    # Make sure we track that we are iterating at this top-level
+                    # version if we haven't already
+                    if truncated not in self.empty_versions:
+                        self.empty_versions[truncated] = set()
                 elif typ == MessageType.FRONTIER:
                     frontier = msg
                     assert self.input_frontier().less_equal(frontier)
                     self.set_input_frontier(frontier)
 
-            # TODO XXX revisit this logic.
-
-            # The motivation here is: we want to stop sending frontier updates for
-            # times that occur after fixedpoint has already been reached for some
-            # input version. Otherwise, we would keep incrementing and circulating
-            # useless frontier updates forever.
-
-            # We want to only send frontier updates for those times that
-            # actually "cover" some data (aka the subset of antichain elements
-            # for which there exists some collection that was sent at a version
-            # less than or equal to that antichain element.)
-            # However, we also can't send the empty antichain if no antichain elements
-            # currently cover some previously sent data, so we always have to retain some
-            # antichain element.
-
-            # I believe this works in cases where the subgraph being iterated on contains
-            # some consolidation because the iteration can then only advance when one of
-            # the upper scope timestamps has been closed. So the antichains sent to
-            # the feedback operator always look like (in the two dimensional case):
-            # [(N, 1), (N - 1, iteration_count1), (N - 2, iteration_count2), ...]
-            # indicating that version N is still open upstream, and thus iteration on it has not
-            # yet started, N - 1 is closed upstream, and is at the iteration_count1-th iteration
-            # and N - 2 is closed upstream, and is at the iteration_count2-th iteration.
-
-            # Generate a potential output frontier by applying the increment to
-            # the current input frontier.
+            # Increment the current input frontier
             incremented_input_frontier = self.input_frontier().apply_step(step)
             # Grab all of the elements from the potential output frontier.
             elements = incremented_input_frontier._elements()
+            # Partition every element from this potential output frontier into one of
+            # two sets, either elements to keep, or elements to reject.
             candidate_output_frontier = []
+            rejected = []
             for elem in elements:
                 truncated = elem.truncate()
-                self.versions_per_toplevel_version[truncated].add(elem)
 
-                # Keep a version if the top level version that it represents has not
-                # gone through the feedback loop at least two times.
-                if len(self.versions_per_toplevel_version[truncated]) <= 2:
+                # Always keep a frontier element if there is are differences associated
+                # with its top-level version that are still in flight.
+                if len(self.in_flight_data[truncated]) != 0:
                     candidate_output_frontier.append(elem)
-                else:
+
+                    # We can stop remembering any versions that will be closed
+                    # by this frontier element.
                     closed = {
-                        x for x in self.pending_versions_with_data if x.less_than(elem)
+                        x for x in self.in_flight_data[truncated] if x.less_than(elem)
                     }
-                    # Keep a version if it would enable further progress on previously sent data.
-                    if len(closed) > 0:
+                    self.in_flight_data[truncated] -= closed
+                else:
+                    # This frontier element does not have any differences associated with its
+                    # top-level version that were not closed out by prior frontier updates.
+
+                    # Remember that we observed an "empty" update for this top-level version.
+                    self.empty_versions[truncated].add(elem)
+
+                    # Don't do anything if we haven't observed at least three "empty" frontier
+                    # updates for this top-level time.
+                    if len(self.empty_versions[truncated]) <= 3:
                         candidate_output_frontier.append(elem)
-                        self.pending_versions_with_data -= closed
-                    # Discard a version if the top level version it represents has gone through
-                    # the feedback loop > 2 times and this version would not actually close
-                    # out any previously sent data, indicating that the iteration has reached fixedpoint.
                     else:
-                        self.versions_per_toplevel_version.pop(truncated)
+                        self.in_flight_data.pop(truncated)
+                        self.empty_versions.pop(truncated)
+                        rejected.append(elem)
+
+            # Ensure that we can still send data at all other top-level
+            # versions that were not rejected.
+            for r in rejected:
+                for truncated in self.in_flight_data.keys():
+                    candidate_output_frontier.append(r.join(truncated.extend()))
+
+            # Construct a minimal antichain from the set of candidate elements.
             candidate_output_frontier = Antichain(candidate_output_frontier)
 
             assert self.output_frontier.less_equal(candidate_output_frontier)
@@ -631,9 +636,9 @@ if __name__ == "__main__":
 
     def geometric_series(collection):
         return (
-            collection.map(lambda data: data + data)
+            collection.map(lambda data: data * 2)
             .concat(collection)
-            .filter(lambda data: data <= 100)
+            .filter(lambda data: data <= 50)
             .map(lambda data: (data, ()))
             .distinct()
             .map(lambda data: data[0])
@@ -647,4 +652,12 @@ if __name__ == "__main__":
     input_a_writer.send_frontier(Antichain([Version(1)]))
 
     for i in range(0, 1000):
+        graph.step()
+    input_a_writer.send_data(Version(1), Collection([(16, 1), (3, 1)]))
+    input_a_writer.send_frontier(Antichain([Version(2)]))
+    for i in range(0, 1020):
+        graph.step()
+    input_a_writer.send_data(Version(2), Collection([(3, -1)]))
+    input_a_writer.send_frontier(Antichain([Version(3)]))
+    for i in range(0, 1020):
         graph.step()

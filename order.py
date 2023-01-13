@@ -29,7 +29,8 @@ class Version:
     def __eq__(self, other):
         return self.inner == other.inner
 
-    # TODO need to make sure it respects partial order
+    # The less than implementation used to sort versions must respect the partial
+    # order (important for reduce).
     def __lt__(self, other):
         return self.inner.__lt__(other.inner)
 
@@ -73,7 +74,7 @@ class Version:
     def advance_by(self, frontier):
         if frontier.inner == ():
             return self
-        result = frontier.inner[0]
+        result = self.join(frontier.inner[0])
         for elem in frontier.inner:
             result = result.meet(self.join(elem))
         return result

@@ -9,7 +9,7 @@ class MessageType(Enum):
     FRONTIER = 2
 
 
-class CollectionStreamReader:
+class DifferenceStreamReader:
     """A read handle to a dataflow edge that receives data and frontier updates from a writer.
 
     The data received over this edge are pairs of (version, Collection) and the frontier
@@ -31,7 +31,7 @@ class CollectionStreamReader:
         return len(self._queue) == 0
 
 
-class CollectionStreamWriter:
+class DifferenceStreamWriter:
     """A write handle to a dataflow edge that is allowed to publish data and send
     frontier updates.
     """
@@ -61,7 +61,7 @@ class CollectionStreamWriter:
     def _new_reader(self):
         q = deque()
         self._queues.append(q)
-        return CollectionStreamReader(q)
+        return DifferenceStreamReader(q)
 
 
 class Operator:

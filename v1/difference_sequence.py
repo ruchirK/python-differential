@@ -1,5 +1,5 @@
-"""The implementation of a bounded, totally ordered sequence of collections
-(a bounded collection trace) as a bounded totally ordered sequence of differences.
+"""The implementation of a collection that changes as a sequence of difference
+collections describing each change.
 """
 
 from collections import defaultdict
@@ -8,51 +8,52 @@ from index import Index
 from itertools import zip_longest
 
 
-class CollectionSequence:
-    """A bounded sequence of collections of data.
+class DifferenceSequence:
+    """A collection that goes through a sequence of changes.
 
-    This class represents a difference collection trace, which is to say, the
-    collection at version N is logically meant to represent the difference
-    between an input collection at version N and an input collection at N - 1.
+    Each change to the collection is described in a difference collection that
+    describes the change between the current version of the collection and the
+    previous version.
+
     This representation is designed for the case where the differences between
-    consecutive collections in the input sequence are small, and so storing the
+    consecutive versions in the sequence are small, and so storing the
     sequence of differences is both space efficient, and enables efficient
     computation of the sequence of output differences.
     """
 
     def __init__(self, trace):
-        self._trace = trace
+        self._inner = trace
 
     def __repr__(self):
-        return f"CollectionSequence({self._trace})"
+        return f"DifferenceSequence({self._inner})"
 
     def map(self, f):
         """Apply a function to all records in the collection trace."""
-        return CollectionSequence([collection.map(f) for collection in self._trace])
+        return DifferenceSequence([collection.map(f) for collection in self._inner])
 
     def filter(self, f):
         """Filter out records where f(record) evaluates to False from all
         collections in the collection trace.
         """
-        return CollectionSequence([collection.filter(f) for collection in self._trace])
+        return DifferenceSequence([collection.filter(f) for collection in self._inner])
 
     def negate(self):
-        return CollectionSequence([collection.negate() for collection in self._trace])
+        return DifferenceSequence([collection.negate() for collection in self._inner])
 
     def concat(self, other):
         """Concatenate two collection traces together."""
-        inputs = zip_longest(self._trace, other._trace, fillvalue=Collection())
-        return CollectionSequence([a.concat(b) for (a, b) in inputs])
+        inputs = zip_longest(self._inner, other._inner, fillvalue=Collection())
+        return DifferenceSequence([a.concat(b) for (a, b) in inputs])
 
     def consolidate(self):
         """Produce a collection trace where each collection in the trace
         is consolidated.
         """
         out = []
-        for collection in self._trace:
+        for collection in self._inner:
             out.append(collection.consolidate())
 
-        return CollectionSequence(out)
+        return DifferenceSequence(out)
 
     def join(self, other):
         """Match pairs (k, v1) and (k, v2) from the two input collection
@@ -64,7 +65,7 @@ class CollectionSequence:
         out = []
 
         for (collection_a, collection_b) in zip_longest(
-            self._trace, other._trace, fillvalue=Collection()
+            self._inner, other._inner, fillvalue=Collection()
         ):
             delta_a = Index()
             delta_b = Index()
@@ -81,7 +82,7 @@ class CollectionSequence:
             index_b.append(delta_b)
             # Consolidating the output is not strictly necessary and is only done here to make the output easier to inspect visually.
             out.append(result.consolidate())
-        return CollectionSequence(out)
+        return DifferenceSequence(out)
 
     def reduce(self, f):
         """Apply a reduction function to all record values, grouped by key."""
@@ -104,7 +105,7 @@ class CollectionSequence:
         keys_todo = defaultdict(set)
         output = []
 
-        for collection in self._trace:
+        for collection in self._inner:
             keys_todo = set()
             result = []
             for ((key, value), multiplicity) in collection._inner:
@@ -124,7 +125,7 @@ class CollectionSequence:
             index.compact(keys)
             index_out.compact(keys)
 
-        return CollectionSequence(output)
+        return DifferenceSequence(output)
 
     def count(self):
         """Count the number of times each key occurs in each collection in the collection
@@ -234,7 +235,7 @@ if __name__ == "__main__":
     )
     e = Collection([(1, 1)])
 
-    trace_a = CollectionSequence(
+    trace_a = DifferenceSequence(
         [
             a,
             Collection([(("apple", "$5"), -1), (("apple", "$7"), 1)]),
@@ -244,7 +245,7 @@ if __name__ == "__main__":
     print(trace_a.map(lambda data: (data[1], data[0])))
     print(trace_a.filter(lambda data: data[0] != "apple"))
 
-    trace_b = CollectionSequence(
+    trace_b = DifferenceSequence(
         [
             b,
             Collection([]),

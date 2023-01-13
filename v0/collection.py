@@ -196,6 +196,7 @@ class Collection:
             curr = result
         return curr
 
+
 if __name__ == "__main__":
     a = Collection([(("apple", "$5"), 2), (("banana", "$2"), 1)])
     b = Collection(

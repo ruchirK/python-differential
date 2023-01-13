@@ -7,8 +7,8 @@ from collections import defaultdict
 from collection import Collection
 from graph import (
     BinaryOperator,
-    CollectionStreamReader,
-    CollectionStreamWriter,
+    DifferenceStreamReader,
+    DifferenceStreamWriter,
     Graph,
     MessageType,
     UnaryOperator,
@@ -19,9 +19,9 @@ from version import Version
 ITERATION_LIMIT = 100
 
 
-class CollectionStreamBuilder:
+class DifferenceStreamBuilder:
     def __init__(self, graph):
-        self._writer = CollectionStreamWriter()
+        self._writer = DifferenceStreamWriter()
         self.graph = graph
 
     def connect_reader(self):
@@ -31,7 +31,7 @@ class CollectionStreamBuilder:
         return self._writer
 
     def map(self, f):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = MapOperator(
             self.connect_reader(), output.writer(), f, self.graph.frontier()
         )
@@ -40,7 +40,7 @@ class CollectionStreamBuilder:
         return output
 
     def filter(self, f):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = FilterOperator(
             self.connect_reader(), output.writer(), f, self.graph.frontier()
         )
@@ -49,7 +49,7 @@ class CollectionStreamBuilder:
         return output
 
     def negate(self):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = NegateOperator(
             self.connect_reader(), output.writer(), self.graph.frontier()
         )
@@ -59,7 +59,7 @@ class CollectionStreamBuilder:
 
     def concat(self, other):
         assert id(self.graph) == id(other.graph)
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = ConcatOperator(
             self.connect_reader(),
             other.connect_reader(),
@@ -71,7 +71,7 @@ class CollectionStreamBuilder:
         return output
 
     def debug(self, name=""):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = DebugOperator(
             self.connect_reader(), output.writer(), name, self.graph.frontier()
         )
@@ -81,7 +81,7 @@ class CollectionStreamBuilder:
 
     def join(self, other):
         assert id(self.graph) == id(other.graph)
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = JoinOperator(
             self.connect_reader(),
             other.connect_reader(),
@@ -93,7 +93,7 @@ class CollectionStreamBuilder:
         return output
 
     def count(self):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = CountOperator(
             self.connect_reader(), output.writer(), self.graph.frontier()
         )
@@ -102,7 +102,7 @@ class CollectionStreamBuilder:
         return output
 
     def consolidate(self):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = ConsolidateOperator(
             self.connect_reader(), output.writer(), self.graph.frontier()
         )
@@ -111,7 +111,7 @@ class CollectionStreamBuilder:
         return output
 
     def distinct(self):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = DistinctOperator(
             self.connect_reader(), output.writer(), self.graph.frontier()
         )
@@ -127,7 +127,7 @@ class CollectionStreamBuilder:
         self.graph.pop_frontier()
 
     def _ingress(self):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = IngressOperator(
             self.connect_reader(),
             output.writer(),
@@ -139,7 +139,7 @@ class CollectionStreamBuilder:
         return output
 
     def _egress(self):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = EgressOperator(
             self.connect_reader(), output.writer(), self.graph.frontier()
         )
@@ -149,8 +149,7 @@ class CollectionStreamBuilder:
 
     def iterate(self, f):
         self._start_scope()
-        feedback_stream = CollectionStreamBuilder(self.graph)
-        feedback_stream.debug("feedback")
+        feedback_stream = DifferenceStreamBuilder(self.graph)
         entered = self._ingress().concat(feedback_stream)
         result = f(entered)
         feedback_operator = FeedbackOperator(
@@ -173,7 +172,7 @@ class GraphBuilder:
         self.frontier_stack = [initial_frontier]
 
     def new_input(self):
-        stream_builder = CollectionStreamBuilder(self)
+        stream_builder = DifferenceStreamBuilder(self)
         self.streams.append(stream_builder.connect_reader())
         return stream_builder, stream_builder.writer()
 
@@ -443,7 +442,7 @@ class DistinctOperator(ReduceOperator):
                 consolidated[val] += diff
             for (val, diff) in consolidated.items():
                 assert diff >= 0
-            return [(val, 1) for (val, diff) in consolidated.items() if diff > 0]
+            return [(val, 1) for (val, diff) in consolidated.items() if diff != 0]
 
         super().__init__(input_a, output, distinct_inner, initial_frontier)
 
@@ -454,7 +453,6 @@ class FeedbackOperator(UnaryOperator):
             for (typ, msg) in self.input_messages():
                 if typ == MessageType.DATA:
                     version, collection = msg
-                    # TODO double check
                     if version.inner[-1] < iteration_limit:
                         self.output.send_data(
                             version.apply_step(step, iteration_limit), collection
@@ -560,9 +558,9 @@ if __name__ == "__main__":
 
     def geometric_series(collection):
         return (
-            collection.map(lambda data: data + data)
+            collection.map(lambda data: data * 2)
             .concat(collection)
-            .filter(lambda data: data <= 100)
+            .filter(lambda data: data <= 50)
             .map(lambda data: (data, ()))
             .distinct()
             .map(lambda data: data[0])
@@ -575,9 +573,13 @@ if __name__ == "__main__":
     input_a_writer.send_data(Version(0), Collection([(1, 1)]))
     input_a_writer.send_frontier(Version(1))
 
+    for i in range(0, 110):
+        graph.step()
+    input_a_writer.send_data(Version(1), Collection([(16, 1), (3, 1)]))
+    input_a_writer.send_frontier(Version(2))
     for i in range(0, 1020):
         graph.step()
-    input_a_writer.send_data(Version(1), Collection([(2, 1), (1, -1)]))
-    input_a_writer.send_frontier(Version(2))
+    input_a_writer.send_data(Version(2), Collection([(3, -1)]))
+    input_a_writer.send_frontier(Version(3))
     for i in range(0, 1020):
         graph.step()

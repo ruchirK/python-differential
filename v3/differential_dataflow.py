@@ -7,8 +7,8 @@ from collections import defaultdict
 from collection import Collection
 from graph import (
     BinaryOperator,
-    CollectionStreamReader,
-    CollectionStreamWriter,
+    DifferenceStreamReader,
+    DifferenceStreamWriter,
     Graph,
     MessageType,
     UnaryOperator,
@@ -16,9 +16,9 @@ from graph import (
 from index import Index
 
 
-class CollectionStreamBuilder:
+class DifferenceStreamBuilder:
     def __init__(self, graph):
-        self._writer = CollectionStreamWriter()
+        self._writer = DifferenceStreamWriter()
         self.graph = graph
 
     def connect_reader(self):
@@ -28,7 +28,7 @@ class CollectionStreamBuilder:
         return self._writer
 
     def map(self, f):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = MapOperator(
             self.connect_reader(), output.writer(), f, self.graph.frontier()
         )
@@ -37,7 +37,7 @@ class CollectionStreamBuilder:
         return output
 
     def filter(self, f):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = FilterOperator(
             self.connect_reader(), output.writer(), f, self.graph.frontier()
         )
@@ -46,7 +46,7 @@ class CollectionStreamBuilder:
         return output
 
     def negate(self):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = NegateOperator(
             self.connect_reader(), output.writer(), self.graph.frontier()
         )
@@ -56,7 +56,7 @@ class CollectionStreamBuilder:
 
     def concat(self, other):
         assert id(self.graph) == id(other.graph)
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = ConcatOperator(
             self.connect_reader(),
             other.connect_reader(),
@@ -68,7 +68,7 @@ class CollectionStreamBuilder:
         return output
 
     def debug(self, name=""):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = DebugOperator(
             self.connect_reader(), output.writer(), name, self.graph.frontier()
         )
@@ -78,7 +78,7 @@ class CollectionStreamBuilder:
 
     def join(self, other):
         assert id(self.graph) == id(other.graph)
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = JoinOperator(
             self.connect_reader(),
             other.connect_reader(),
@@ -90,7 +90,7 @@ class CollectionStreamBuilder:
         return output
 
     def count(self):
-        output = CollectionStreamBuilder(self.graph)
+        output = DifferenceStreamBuilder(self.graph)
         operator = CountOperator(
             self.connect_reader(), output.writer(), self.graph.frontier()
         )
@@ -106,7 +106,7 @@ class GraphBuilder:
         self.initial_frontier = initial_frontier
 
     def new_input(self):
-        stream_builder = CollectionStreamBuilder(self)
+        stream_builder = DifferenceStreamBuilder(self)
         self.streams.append(stream_builder.connect_reader())
         return stream_builder, stream_builder.writer()
 

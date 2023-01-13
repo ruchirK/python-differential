@@ -3,10 +3,11 @@
 from collections import deque
 
 
-class CollectionStreamReader:
+class DifferenceStreamReader:
     """A read handle to a dataflow edge that receives data from a writer.
 
-    The data received over this edge are Collection objects.
+    The data received over this edge are Collection objects that represent difference
+    collections representing a single logical collection undergoing changes.
     """
 
     def __init__(self, queue):
@@ -23,7 +24,7 @@ class CollectionStreamReader:
         return len(self._queue) == 0
 
 
-class CollectionStreamWriter:
+class DifferenceStreamWriter:
     """A write handle to a dataflow edge that is allowed to publish data."""
 
     def __init__(self):
@@ -36,7 +37,7 @@ class CollectionStreamWriter:
     def _new_reader(self):
         q = deque()
         self._queues.append(q)
-        return CollectionStreamReader(q)
+        return DifferenceStreamReader(q)
 
 
 class Operator:
